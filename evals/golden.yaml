@@ -1,0 +1,609 @@
+# Golden dataset for the Deflect eval harness.
+#
+# Every expected_sources path is verified to exist in the ingested corpus
+# (fastapi/fastapi @ 95f8322ee1dcda7ceace7b1c4f6c9915b36d748f, docs/en/docs).
+#
+# Items with should_escalate: true are answerable from no document in the corpus.
+# They exercise the refusal path and must name no expected_sources.
+
+# --- Exact-term lookups -------------------------------------------------------
+
+- id: q001
+  question: What does FastAPI return when request validation fails?
+  ideal_answer: >-
+    FastAPI returns HTTP 422 Unprocessable Entity with a JSON body describing which
+    fields failed validation and why.
+  expected_sources: [tutorial/handling-errors.md]
+  should_escalate: false
+
+- id: q002
+  question: How do I declare a dependency in a path operation function?
+  ideal_answer: >-
+    Declare a parameter with Depends(your_dependency). FastAPI calls the dependency
+    and passes its return value as the parameter.
+  expected_sources: [tutorial/dependencies/index.md]
+  should_escalate: false
+
+- id: q003
+  question: What is BackgroundTasks used for?
+  ideal_answer: >-
+    BackgroundTasks schedules work to run after the response has been sent, so the
+    client is not made to wait for it.
+  expected_sources: [tutorial/background-tasks.md]
+  should_escalate: false
+
+- id: q004
+  question: How do I set a custom status code for a path operation?
+  ideal_answer: >-
+    Pass status_code to the path operation decorator, for example
+    @app.post("/items/", status_code=201).
+  expected_sources: [tutorial/response-status-code.md]
+  should_escalate: false
+
+- id: q005
+  question: What does HTTPException do?
+  ideal_answer: >-
+    Raising HTTPException returns an HTTP error response to the client with the
+    status code and detail you provide.
+  expected_sources: [tutorial/handling-errors.md]
+  should_escalate: false
+
+- id: q006
+  question: How do I mount a directory of static files?
+  ideal_answer: >-
+    Use app.mount with StaticFiles, for example
+    app.mount("/static", StaticFiles(directory="static"), name="static").
+  expected_sources: [tutorial/static-files.md]
+  should_escalate: false
+
+- id: q007
+  question: What is APIRouter for?
+  ideal_answer: >-
+    APIRouter lets you split path operations across multiple modules and include
+    them into the main application with app.include_router.
+  expected_sources: [tutorial/bigger-applications.md, reference/apirouter.md]
+  should_escalate: false
+
+- id: q008
+  question: How do I enable CORS?
+  ideal_answer: >-
+    Add CORSMiddleware with app.add_middleware, specifying allow_origins and the
+    methods and headers you want to permit.
+  expected_sources: [tutorial/cors.md]
+  should_escalate: false
+
+- id: q009
+  question: What does response_model do?
+  ideal_answer: >-
+    response_model declares the schema of the response. FastAPI validates, filters
+    and documents the returned data against it.
+  expected_sources: [tutorial/response-model.md]
+  should_escalate: false
+
+- id: q010
+  question: How do I read a file uploaded in a request?
+  ideal_answer: >-
+    Declare a parameter of type UploadFile. It exposes the filename, content type
+    and an async file-like interface.
+  expected_sources: [tutorial/request-files.md]
+  should_escalate: false
+
+- id: q011
+  question: What is jsonable_encoder used for?
+  ideal_answer: >-
+    jsonable_encoder converts objects such as Pydantic models and datetimes into
+    types that can be stored or serialised as JSON.
+  expected_sources: [tutorial/encoder.md, reference/encoders.md]
+  should_escalate: false
+
+- id: q012
+  question: How do I declare a cookie parameter?
+  ideal_answer: Declare the parameter with Cookie as its default, for example ads_id = Cookie(None).
+  expected_sources: [tutorial/cookie-params.md]
+  should_escalate: false
+
+- id: q013
+  question: How do I declare a header parameter?
+  ideal_answer: >-
+    Declare the parameter with Header as its default. FastAPI converts underscores
+    to hyphens when matching header names.
+  expected_sources: [tutorial/header-params.md]
+  should_escalate: false
+
+- id: q014
+  question: What does TestClient do?
+  ideal_answer: >-
+    TestClient wraps the application so you can call its endpoints directly in
+    tests without running a server.
+  expected_sources: [tutorial/testing.md]
+  should_escalate: false
+
+- id: q015
+  question: How do I define a WebSocket endpoint?
+  ideal_answer: >-
+    Use the @app.websocket decorator on an async function taking a WebSocket
+    parameter, then accept the connection and send or receive messages.
+  expected_sources: [advanced/websockets.md]
+  should_escalate: false
+
+# --- Conceptual and paraphrased ----------------------------------------------
+
+- id: q016
+  question: When should I write my endpoints with async def instead of def?
+  ideal_answer: >-
+    Use async def when the endpoint awaits asynchronous libraries. Use plain def
+    when the work is blocking; FastAPI runs those in a thread pool so they do not
+    block the event loop.
+  expected_sources: [async.md]
+  should_escalate: false
+
+- id: q017
+  question: How can I share a database session across several endpoints?
+  ideal_answer: >-
+    Write a dependency that yields the session and depend on it from each path
+    operation. Code after the yield runs once the response is delivered.
+  expected_sources: [tutorial/dependencies/dependencies-with-yield.md, tutorial/sql-databases.md]
+  should_escalate: false
+
+- id: q018
+  question: How do I make a value available to every route without repeating myself?
+  ideal_answer: >-
+    Pass dependencies to the FastAPI constructor as global dependencies, or to an
+    APIRouter so they apply to every route it contains.
+  expected_sources: [tutorial/dependencies/global-dependencies.md]
+  should_escalate: false
+
+- id: q019
+  question: How do I run cleanup code when the application shuts down?
+  ideal_answer: >-
+    Use a lifespan async context manager passed to the FastAPI constructor. Code
+    after the yield runs on shutdown.
+  expected_sources: [advanced/events.md]
+  should_escalate: false
+
+- id: q020
+  question: How do I load configuration from environment variables?
+  ideal_answer: >-
+    Define a Pydantic Settings class whose fields are read from the environment,
+    and provide it through a dependency so it can be overridden in tests.
+  expected_sources: [advanced/settings.md, environment-variables.md]
+  should_escalate: false
+
+- id: q021
+  question: How do I return a response that is not JSON?
+  ideal_answer: >-
+    Set response_class on the path operation, or return a Response subclass such
+    as HTMLResponse or PlainTextResponse directly.
+  expected_sources: [advanced/custom-response.md]
+  should_escalate: false
+
+- id: q022
+  question: How can a dependency itself depend on another dependency?
+  ideal_answer: >-
+    A dependency function can declare its own Depends parameters. FastAPI resolves
+    the whole graph and caches each dependency once per request.
+  expected_sources: [tutorial/dependencies/sub-dependencies.md]
+  should_escalate: false
+
+- id: q023
+  question: How do I use a class as a dependency?
+  ideal_answer: >-
+    Pass the class to Depends. FastAPI inspects its __init__ parameters and treats
+    them as request parameters, giving you an instance.
+  expected_sources: [tutorial/dependencies/classes-as-dependencies.md]
+  should_escalate: false
+
+- id: q024
+  question: How do I add authentication to my API?
+  ideal_answer: >-
+    Use the security utilities such as OAuth2PasswordBearer as a dependency, then
+    resolve the token to a user in a further dependency.
+  expected_sources: [tutorial/security/first-steps.md, tutorial/security/get-current-user.md]
+  should_escalate: false
+
+- id: q025
+  question: How do I issue and verify JWT tokens?
+  ideal_answer: >-
+    Hash passwords, sign a JWT on login with a secret and expiry, and decode it in
+    a dependency that resolves the current user.
+  expected_sources: [tutorial/security/oauth2-jwt.md]
+  should_escalate: false
+
+- id: q026
+  question: How do I validate that a query parameter is within a numeric range?
+  ideal_answer: >-
+    Declare it with Query and pass constraints such as ge and le, for example
+    Query(ge=1, le=100).
+  expected_sources: [tutorial/query-params-str-validations.md, tutorial/path-params-numeric-validations.md]
+  should_escalate: false
+
+- id: q027
+  question: How do I document extra responses my endpoint can return?
+  ideal_answer: >-
+    Pass a responses dict to the path operation decorator, keyed by status code,
+    describing the model and description for each.
+  expected_sources: [advanced/additional-responses.md]
+  should_escalate: false
+
+- id: q028
+  question: How do I set a cookie on the response?
+  ideal_answer: >-
+    Declare a Response parameter and call response.set_cookie, or call set_cookie
+    on a Response object you return directly.
+  expected_sources: [advanced/response-cookies.md]
+  should_escalate: false
+
+- id: q029
+  question: How do I add custom headers to a response?
+  ideal_answer: >-
+    Declare a Response parameter and assign to response.headers, or pass headers
+    when constructing the Response you return.
+  expected_sources: [advanced/response-headers.md]
+  should_escalate: false
+
+- id: q030
+  question: How do I write middleware that runs on every request?
+  ideal_answer: >-
+    Decorate an async function with @app.middleware("http"). It receives the
+    request and a call_next function and returns the response.
+  expected_sources: [tutorial/middleware.md, advanced/middleware.md]
+  should_escalate: false
+
+- id: q031
+  question: How do I stream a large response instead of buffering it?
+  ideal_answer: >-
+    Return a StreamingResponse wrapping a generator or async generator that yields
+    chunks of the body.
+  expected_sources: [advanced/stream-data.md, advanced/custom-response.md]
+  should_escalate: false
+
+- id: q032
+  question: How do I override a dependency in my tests?
+  ideal_answer: >-
+    Assign a replacement into app.dependency_overrides keyed by the original
+    dependency, and clear it after the test.
+  expected_sources: [advanced/testing-dependencies.md]
+  should_escalate: false
+
+- id: q033
+  question: How do I test an endpoint that uses async code?
+  ideal_answer: >-
+    Use an async HTTP client such as httpx.AsyncClient with ASGITransport, driven
+    by an async test runner like anyio or pytest-asyncio.
+  expected_sources: [advanced/async-tests.md]
+  should_escalate: false
+
+- id: q034
+  question: How do I run my app behind a reverse proxy with a path prefix?
+  ideal_answer: >-
+    Set root_path on the FastAPI application, or pass --root-path to the server, so
+    generated URLs and the docs account for the prefix.
+  expected_sources: [advanced/behind-a-proxy.md]
+  should_escalate: false
+
+- id: q035
+  question: How do I containerise a FastAPI application?
+  ideal_answer: >-
+    Write a Dockerfile based on a Python image, install requirements, copy the
+    application, and run it with a server such as uvicorn or fastapi run.
+  expected_sources: [deployment/docker.md]
+  should_escalate: false
+
+- id: q036
+  question: How many worker processes should I run in production?
+  ideal_answer: >-
+    Run multiple workers to use multiple CPU cores, but only one worker per
+    container when a container orchestrator handles replication.
+  expected_sources: [deployment/server-workers.md, deployment/concepts.md]
+  should_escalate: false
+
+- id: q037
+  question: Do I need HTTPS and how is it usually handled?
+  ideal_answer: >-
+    Yes. TLS is normally terminated by a proxy in front of the application, which
+    holds the certificates and forwards plain HTTP internally.
+  expected_sources: [deployment/https.md]
+  should_escalate: false
+
+- id: q038
+  question: How do I nest one Pydantic model inside another for the request body?
+  ideal_answer: >-
+    Declare a field whose type is another model. FastAPI validates and documents
+    the nested structure automatically.
+  expected_sources: [tutorial/body-nested-models.md]
+  should_escalate: false
+
+- id: q039
+  question: How do I accept several body parameters in one request?
+  ideal_answer: >-
+    Declare more than one model parameter. FastAPI expects a JSON object with a
+    key per parameter name.
+  expected_sources: [tutorial/body-multiple-params.md]
+  should_escalate: false
+
+- id: q040
+  question: How do I partially update a record?
+  ideal_answer: >-
+    Use PATCH with exclude_unset on the incoming model so only the fields the
+    client actually sent are applied.
+  expected_sources: [tutorial/body-updates.md]
+  should_escalate: false
+
+- id: q041
+  question: How do I give a field an example value in the docs?
+  ideal_answer: >-
+    Provide examples via Field, or via the model config json_schema_extra, and the
+    OpenAPI schema will carry them.
+  expected_sources: [tutorial/schema-extra-example.md]
+  should_escalate: false
+
+- id: q042
+  question: How do I make a query parameter optional?
+  ideal_answer: >-
+    Give it a default value of None and annotate it as optional. Parameters with
+    defaults are not required.
+  expected_sources: [tutorial/query-params.md]
+  should_escalate: false
+
+- id: q043
+  question: How do I declare a path parameter with a type?
+  ideal_answer: >-
+    Annotate the function parameter whose name matches the path placeholder, for
+    example item_id: int. FastAPI converts and validates it.
+  expected_sources: [tutorial/path-params.md]
+  should_escalate: false
+
+- id: q044
+  question: How do I return HTML from an endpoint?
+  ideal_answer: >-
+    Return an HTMLResponse, or set response_class=HTMLResponse on the path
+    operation and return the markup.
+  expected_sources: [advanced/custom-response.md]
+  should_escalate: false
+
+- id: q045
+  question: How do I render server-side templates?
+  ideal_answer: >-
+    Use Jinja2Templates, pointing it at your template directory, and return
+    TemplateResponse with the request in the context.
+  expected_sources: [advanced/templates.md]
+  should_escalate: false
+
+- id: q046
+  question: How do I use dataclasses instead of Pydantic models?
+  ideal_answer: >-
+    FastAPI accepts standard dataclasses for request bodies and response models,
+    converting them to Pydantic dataclasses internally.
+  expected_sources: [advanced/dataclasses.md]
+  should_escalate: false
+
+- id: q047
+  question: How do I mount another ASGI or WSGI application?
+  ideal_answer: >-
+    Use app.mount with the sub-application, wrapping WSGI applications in
+    WSGIMiddleware first.
+  expected_sources: [advanced/sub-applications.md, advanced/wsgi.md]
+  should_escalate: false
+
+- id: q048
+  question: How do I change the title and version shown in the API docs?
+  ideal_answer: >-
+    Pass title, description and version to the FastAPI constructor, and use
+    openapi_tags to describe tag groups.
+  expected_sources: [tutorial/metadata.md]
+  should_escalate: false
+
+- id: q049
+  question: How do I hide an endpoint from the generated documentation?
+  ideal_answer: Pass include_in_schema=False to the path operation decorator.
+  expected_sources: [advanced/path-operation-advanced-configuration.md]
+  should_escalate: false
+
+- id: q050
+  question: How do I generate a typed client from my API?
+  ideal_answer: >-
+    Serve the OpenAPI schema and run a generator against it; customising operation
+    ids first produces cleaner client method names.
+  expected_sources: [advanced/generate-clients.md]
+  should_escalate: false
+
+- id: q051
+  question: How do I read the raw request object?
+  ideal_answer: >-
+    Declare a parameter annotated with Request. It gives access to headers, the
+    client address and the raw body.
+  expected_sources: [advanced/using-request-directly.md]
+  should_escalate: false
+
+- id: q052
+  question: How do I return a different status code depending on what happened?
+  ideal_answer: >-
+    Declare a Response parameter and set response.status_code, or return a
+    JSONResponse with the status code you want.
+  expected_sources: [advanced/response-change-status-code.md, advanced/additional-status-codes.md]
+  should_escalate: false
+
+- id: q053
+  question: How do I handle form submissions?
+  ideal_answer: >-
+    Declare parameters with Form as their default. Form data requires
+    python-multipart to be installed.
+  expected_sources: [tutorial/request-forms.md]
+  should_escalate: false
+
+- id: q054
+  question: How do I accept a form containing both fields and files?
+  ideal_answer: >-
+    Declare File and Form parameters in the same path operation; they are read
+    from one multipart request.
+  expected_sources: [tutorial/request-forms-and-files.md]
+  should_escalate: false
+
+- id: q055
+  question: How do I restrict what a token is allowed to do?
+  ideal_answer: >-
+    Use OAuth2 scopes: declare required scopes with Security and check the scopes
+    carried by the token in the dependency.
+  expected_sources: [advanced/security/oauth2-scopes.md]
+  should_escalate: false
+
+- id: q056
+  question: What is the difference between the request model and the response model schemas?
+  ideal_answer: >-
+    FastAPI generates separate input and output schemas so fields that are
+    optional on input but always present on output are documented correctly.
+  expected_sources: [how-to/separate-openapi-schemas.md]
+  should_escalate: false
+
+- id: q057
+  question: How do I disable the interactive docs in production?
+  ideal_answer: >-
+    Pass openapi_url=None to the FastAPI constructor, or set it conditionally from
+    an environment setting.
+  expected_sources: [how-to/conditional-openapi.md]
+  should_escalate: false
+
+- id: q058
+  question: How do I use a database in my tests without touching the real one?
+  ideal_answer: >-
+    Override the session dependency to point at a separate test database, and
+    create and drop its tables around the tests.
+  expected_sources: [how-to/testing-database.md]
+  should_escalate: false
+
+- id: q059
+  question: How do I run the development server?
+  ideal_answer: >-
+    Run fastapi dev, which starts the application with auto-reload. Use fastapi
+    run for production.
+  expected_sources: [fastapi-cli.md]
+  should_escalate: false
+
+- id: q060
+  question: How do I send server-sent events?
+  ideal_answer: >-
+    Return a StreamingResponse with media type text/event-stream from a generator
+    that yields correctly formatted event lines.
+  expected_sources: [tutorial/server-sent-events.md]
+  should_escalate: false
+
+- id: q061
+  question: How do I declare a UUID or datetime parameter?
+  ideal_answer: >-
+    Annotate the parameter with the type. FastAPI supports UUID, datetime, date,
+    time, timedelta, Decimal and others, converting and validating them.
+  expected_sources: [tutorial/extra-data-types.md]
+  should_escalate: false
+
+- id: q062
+  question: How do I group several query parameters into one model?
+  ideal_answer: >-
+    Declare a Pydantic model parameter annotated with Query; its fields become the
+    individual query parameters.
+  expected_sources: [tutorial/query-param-models.md]
+  should_escalate: false
+
+- id: q063
+  question: How do I run a dependency purely for its side effect?
+  ideal_answer: >-
+    Pass it in the dependencies list of the path operation decorator. It runs and
+    can raise, but its return value is discarded.
+  expected_sources: [tutorial/dependencies/dependencies-in-path-operation-decorators.md]
+  should_escalate: false
+
+- id: q064
+  question: How do I debug my application from an editor?
+  ideal_answer: >-
+    Run uvicorn from inside a __main__ block so the editor's debugger can start
+    the process and attach breakpoints.
+  expected_sources: [tutorial/debugging.md]
+  should_escalate: false
+
+- id: q065
+  question: What Python version does FastAPI require?
+  ideal_answer: >-
+    FastAPI targets modern Python versions and relies on standard type hints; the
+    documentation states the supported minimum.
+  expected_sources: [index.md, python-types.md]
+  should_escalate: false
+
+# --- Unanswerable from the corpus: these must be refused ----------------------
+
+- id: u001
+  question: How much does a FastAPI enterprise support licence cost per year?
+  ideal_answer: The documentation does not cover pricing for a support licence.
+  should_escalate: true
+
+- id: u002
+  question: What new features are planned for the next major FastAPI release?
+  ideal_answer: The documentation does not describe an unreleased roadmap.
+  should_escalate: true
+
+- id: u003
+  question: How do I configure Django REST Framework serializers?
+  ideal_answer: This concerns a different framework and is not covered by the FastAPI documentation.
+  should_escalate: true
+
+- id: u004
+  question: What is my current account balance?
+  ideal_answer: The documentation holds no account or user data.
+  should_escalate: true
+
+- id: u005
+  question: How do I train a transformer model on my own dataset?
+  ideal_answer: Model training is unrelated to the FastAPI documentation.
+  should_escalate: true
+
+- id: u006
+  question: Which company acquired FastAPI in 2025?
+  ideal_answer: The documentation makes no such claim, and the premise is not supported by it.
+  should_escalate: true
+
+- id: u007
+  question: What is the phone number for FastAPI technical support?
+  ideal_answer: The documentation lists no support telephone number.
+  should_escalate: true
+
+- id: u008
+  question: How do I write a Kubernetes operator in Go?
+  ideal_answer: This is unrelated to the FastAPI documentation.
+  should_escalate: true
+
+- id: u009
+  question: What were FastAPI's download numbers last month?
+  ideal_answer: The documentation does not publish download statistics.
+  should_escalate: true
+
+- id: u010
+  question: How do I reset the password for my Deflect account?
+  ideal_answer: The documentation covers FastAPI, not this application's accounts.
+  should_escalate: true
+
+- id: u011
+  question: Which FastAPI release removed support for Pydantic v1?
+  ideal_answer: >-
+    The documentation explains migrating from Pydantic v1 to v2 but does not name a
+    release that removed v1 support.
+  should_escalate: true
+
+- id: u012
+  question: What is the SLA for the FastAPI Cloud free tier?
+  ideal_answer: The documentation does not state service level agreements.
+  should_escalate: true
+
+- id: u013
+  question: How do I integrate FastAPI with SAP HANA?
+  ideal_answer: The documentation does not cover this database.
+  should_escalate: true
+
+- id: u014
+  question: Who is the current maintainer of the Starlette project?
+  ideal_answer: >-
+    The documentation refers to Starlette as a dependency but does not identify its
+    maintainers.
+  should_escalate: true
+
+- id: u015
+  question: What is the recommended way to migrate a Rails application to FastAPI?
+  ideal_answer: The documentation offers no migration guide from Rails.
+  should_escalate: true
