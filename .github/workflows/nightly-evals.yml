@@ -1,0 +1,45 @@
+name: nightly-evals
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  full-evals:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: deflect
+          POSTGRES_PASSWORD: deflect
+          POSTGRES_DB: deflect
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U deflect"
+          --health-interval 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    defaults:
+      run:
+        working-directory: services/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: uv run alembic upgrade head
+      - name: Ingest the pinned corpus
+        run: |
+          git clone --depth 1 https://github.com/fastapi/fastapi /tmp/fastapi-src
+          uv run python scripts/ingest.py /tmp/fastapi-src/docs/en/docs \
+            "$(git -C /tmp/fastapi-src rev-parse HEAD)"
+
+      - name: Full golden dataset
+        run: uv run python scripts/run_evals.py --fail-under 0.85
+
+      - name: Retrieval ablation
+        run: uv run python scripts/ablate.py

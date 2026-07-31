@@ -1,0 +1,108 @@
+name: ci
+
+on: [push, pull_request]
+
+env:
+  DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect
+  CORPUS_DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: deflect
+          POSTGRES_PASSWORD: deflect
+          POSTGRES_DB: deflect
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U deflect"
+          --health-interval 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: services/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+
+      - name: Create the test database
+        run: psql "postgresql://deflect:deflect@localhost:5432/postgres" -c "CREATE DATABASE deflect_test"
+        env:
+          PGPASSWORD: deflect
+
+      - run: uv run alembic upgrade head
+      - name: Migrate the test database
+        run: uv run alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_test
+
+      - run: uv run ruff check .
+
+      # The golden dataset names real document paths, and a test verifies every one
+      # of them against the ingested corpus. That check is the reason CI ingests.
+      - name: Ingest the pinned corpus
+        run: |
+          git clone --depth 1 https://github.com/fastapi/fastapi /tmp/fastapi-src
+          uv run python scripts/ingest.py /tmp/fastapi-src/docs/en/docs \
+            "$(git -C /tmp/fastapi-src rev-parse HEAD)"
+
+      - run: uv run pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  eval-smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: deflect
+          POSTGRES_PASSWORD: deflect
+          POSTGRES_DB: deflect
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U deflect"
+          --health-interval 5s --health-retries 10
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    defaults:
+      run:
+        working-directory: services/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: uv run alembic upgrade head
+      - name: Ingest the pinned corpus
+        run: |
+          git clone --depth 1 https://github.com/fastapi/fastapi /tmp/fastapi-src
+          uv run python scripts/ingest.py /tmp/fastapi-src/docs/en/docs \
+            "$(git -C /tmp/fastapi-src rev-parse HEAD)"
+
+      # Fails the build when faithfulness regresses. This is the gate: a prompt
+      # change that makes answers less grounded cannot merge.
+      - name: Eval smoke set
+        run: uv run python scripts/run_evals.py --limit 10 --fail-under 0.85
