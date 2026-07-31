@@ -11,7 +11,9 @@ from deflect.retrieval.pipeline import RetrievalConfig
 PERMISSIVE = GateThresholds(min_top_score=float("-inf"), min_margin=float("-inf"))
 
 
-async def test_answer_includes_citations_for_the_chunks_the_model_used(session, corpus, answer_payload):
+async def test_answer_includes_citations_for_the_chunks_the_model_used(
+    session, corpus, answer_payload
+):
     chunk_id = (
         await session.execute(select(Chunk.id).where(Chunk.document_id == corpus.id))
     ).scalars().first()
@@ -67,7 +69,9 @@ async def test_token_usage_and_prompt_version_are_reported(session, corpus, answ
     assert result.prompt_version == "answer_v1"
 
 
-async def test_citations_referencing_unretrieved_chunks_are_dropped(session, corpus, answer_payload):
+async def test_citations_referencing_unretrieved_chunks_are_dropped(
+    session, corpus, answer_payload
+):
     client = FakeClient([answer_payload("x", [999999], True)])
 
     result = await answer_question(

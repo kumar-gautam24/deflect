@@ -1,7 +1,9 @@
 """Provider-agnostic completion interface."""
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Annotated, Protocol
+
+from fastapi import Depends
 
 
 @dataclass(frozen=True)
@@ -34,3 +36,8 @@ def get_client(provider: str | None = None, model: str | None = None) -> LLMClie
     if provider == "ollama":
         return OllamaClient(model)
     raise ValueError(f"unknown provider: {provider}")
+
+
+# Mirrors SessionDep in deflect.db: routes declare the dependency by type, which is
+# what keeps Depends() out of argument defaults.
+ClientDep = Annotated[LLMClient, Depends(get_client)]
