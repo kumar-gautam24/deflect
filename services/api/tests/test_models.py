@@ -19,6 +19,10 @@ async def test_chunk_stores_embedding_and_links_to_document(session):
     )
     await session.flush()
 
-    stored = (await session.execute(select(Chunk))).scalar_one()
+    # Scoped to this document: the suite runs against a database that already holds
+    # the ingested corpus, so an unscoped query would see thousands of rows.
+    stored = (
+        await session.execute(select(Chunk).where(Chunk.document_id == document.id))
+    ).scalar_one()
     assert stored.document_id == document.id
     assert len(stored.embedding) == 384

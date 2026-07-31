@@ -204,7 +204,9 @@ def get_settings() -> Settings:
 ```python
 # services/api/src/deflect/db.py
 from collections.abc import AsyncGenerator
+from typing import Annotated
 
+from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from deflect.config import get_settings
@@ -216,23 +218,27 @@ SessionFactory = async_sessionmaker(engine, expire_on_commit=False)
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     async with SessionFactory() as session:
         yield session
+
+
+# Every route takes a session, so the dependency is declared once here. Annotated is
+# also what keeps Depends() out of argument defaults, which ruff's B008 rejects.
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
 ```
 
 - [ ] **Step 6: Write main.py**
 
 ```python
 # services/api/src/deflect/main.py
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from deflect.db import get_session
+from deflect.db import SessionDep
 
 app = FastAPI(title="Deflect")
 
 
 @app.get("/health")
-async def health(session: AsyncSession = Depends(get_session)) -> dict[str, str]:
+async def health(session: SessionDep) -> dict[str, str]:
     await session.execute(text("select 1"))
     return {"status": "ok", "database": "connected"}
 ```
@@ -376,7 +382,11 @@ async def test_chunk_stores_embedding_and_links_to_document(session):
     )
     await session.flush()
 
-    stored = (await session.execute(select(Chunk))).scalar_one()
+    # Scoped to this document: the suite runs against a database that already holds
+    # the ingested corpus, so an unscoped query would see thousands of rows.
+    stored = (
+        await session.execute(select(Chunk).where(Chunk.document_id == document.id))
+    ).scalar_one()
     assert stored.document_id == document.id
     assert len(stored.embedding) == 384
 ```
@@ -728,10 +738,21 @@ async def test_ingest_persists_documents_and_chunks(session, tmp_path: Path):
 
     count = await ingest_directory(session, tmp_path, commit_sha="abc123")
 
-    documents = (await session.execute(select(Document))).scalars().all()
+    # Every assertion is scoped to rows this test produced. The suite runs against a
+    # database already holding the ingested corpus, so unscoped queries would see it.
+    documents = (
+        await session.execute(select(Document).where(Document.commit_sha == "abc123"))
+    ).scalars().all()
     assert {d.source_path for d in documents} == {"index.md", "tutorial/first.md"}
-    assert all(d.commit_sha == "abc123" for d in documents)
-    assert count == (await session.execute(select(func.count(Chunk.id)))).scalar_one()
+
+    chunk_count = (
+        await session.execute(
+            select(func.count(Chunk.id)).where(
+                Chunk.document_id.in_([d.id for d in documents])
+            )
+        )
+    ).scalar_one()
+    assert count == chunk_count
 
 
 async def test_reingest_replaces_previous_chunks_for_a_document(session, tmp_path: Path):
@@ -742,7 +763,12 @@ async def test_reingest_replaces_previous_chunks_for_a_document(session, tmp_pat
     path.write_text("# A\n\nrevised\n")
     await ingest_directory(session, tmp_path, commit_sha="sha2")
 
-    texts = (await session.execute(select(Chunk.text))).scalars().all()
+    document = (
+        await session.execute(select(Document).where(Document.source_path == "a.md"))
+    ).scalar_one()
+    texts = (
+        await session.execute(select(Chunk.text).where(Chunk.document_id == document.id))
+    ).scalars().all()
     assert len(texts) == 1
     assert "revised" in texts[0]
 ```
@@ -2044,7 +2070,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
-from deflect.db import get_session
+from deflect.db import SessionDep
 from deflect.ingest.embedder import embed_texts
 from deflect.llm.base import get_client
 from deflect.llm.fake import FakeClient
@@ -2243,7 +2269,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from deflect.answer.gate import GateThresholds
 from deflect.answer.service import answer_question
-from deflect.db import get_session
+from deflect.db import SessionDep
 from deflect.llm.base import LLMClient, get_client
 from deflect.retrieval.pipeline import RetrievalConfig
 from deflect.telemetry import record_trace
@@ -2265,7 +2291,7 @@ def _event(payload: dict) -> str:
 @router.post("/ask")
 async def ask(
     request: AskRequest,
-    session: AsyncSession = Depends(get_session),
+    session: SessionDep,
     client: LLMClient = Depends(get_client),
 ) -> StreamingResponse:
     async def stream() -> AsyncIterator[str]:
@@ -3235,7 +3261,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from deflect.db import get_session
+from deflect.db import SessionDep
 from deflect.models import EvalResult, EvalRun
 
 router = APIRouter(prefix="/eval-runs")
@@ -3282,14 +3308,14 @@ async def _results_for(session: AsyncSession, run_id: int) -> list[EvalResult]:
 
 
 @router.get("")
-async def list_runs(session: AsyncSession = Depends(get_session)) -> list[dict]:
+async def list_runs(session: SessionDep) -> list[dict]:
     statement = select(EvalRun).order_by(EvalRun.id.desc()).limit(50)
     return [_run_summary(run) for run in (await session.execute(statement)).scalars()]
 
 
 @router.get("/diff")
 async def diff_runs(
-    base: int, head: int, session: AsyncSession = Depends(get_session)
+    base: int, head: int, session: SessionDep
 ) -> dict:
     base_run, head_run = await _load_run(session, base), await _load_run(session, head)
     base_by_item = {r.item_id: r for r in await _results_for(session, base)}
@@ -3317,7 +3343,7 @@ async def diff_runs(
 
 
 @router.get("/{run_id}")
-async def get_run(run_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+async def get_run(run_id: int, session: SessionDep) -> dict:
     run = await _load_run(session, run_id)
     return _run_summary(run) | {"results": [_result_row(r) for r in await _results_for(session, run_id)]}
 ```
@@ -3332,7 +3358,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from deflect.db import get_session
+from deflect.db import SessionDep
 from deflect.models import Trace
 
 router = APIRouter(prefix="/traces")
@@ -3359,13 +3385,13 @@ def _serialize(trace: Trace) -> dict:
 
 
 @router.get("")
-async def list_traces(session: AsyncSession = Depends(get_session)) -> list[dict]:
+async def list_traces(session: SessionDep) -> list[dict]:
     statement = select(Trace).order_by(Trace.id.desc()).limit(100)
     return [_serialize(trace) for trace in (await session.execute(statement)).scalars()]
 
 
 @router.get("/{trace_id}")
-async def get_trace(trace_id: int, session: AsyncSession = Depends(get_session)) -> dict:
+async def get_trace(trace_id: int, session: SessionDep) -> dict:
     trace = await session.get(Trace, trace_id)
     if trace is None:
         raise HTTPException(status_code=404, detail=f"trace {trace_id} not found")
