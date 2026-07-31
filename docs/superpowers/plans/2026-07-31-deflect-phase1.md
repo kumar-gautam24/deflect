@@ -21,7 +21,9 @@ Copied verbatim from the spec. Every task's requirements implicitly include this
 - Tests assert behavior, never tautologies.
 - Commits are incremental and describe intent. No generated co-author trailers.
 - README is factual: architecture, ablation table, tradeoff curve, run instructions.
-- Target size for Phase 1 is 2,500-3,500 lines. Exceeding it triggers a cut, not an exception.
+- Target size for Phase 1 is 3,800 lines of code. `evals/golden.yaml` is hand-labeled
+  data, not code, and does not count against the ceiling. Exceeding the ceiling
+  triggers a cut, not an exception.
 - The web app never calls an LLM. All model access is server-side in the FastAPI service.
 - The eval harness and the live app must execute the same answer code path.
 - Embedding dimension is 384 (`BAAI/bge-small-en-v1.5`). This value appears in the migration and in config; they must agree.
