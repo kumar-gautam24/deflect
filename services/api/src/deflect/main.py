@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from deflect.db import SessionDep
-from deflect.routes import ask
+from deflect.routes import ask, evals, traces
 
 app = FastAPI(title="Deflect")
 
@@ -15,6 +15,8 @@ app.add_middleware(
 )
 
 app.include_router(ask.router)
+app.include_router(evals.router)
+app.include_router(traces.router)
 
 
 @app.get("/health")
