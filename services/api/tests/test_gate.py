@@ -66,3 +66,9 @@ def test_grounding_can_be_disabled_independently_of_retrieval_thresholds():
     decision = evaluate_gate(hits(0.9, 0.4), grounded=False, thresholds=thresholds)
 
     assert decision.escalate is False
+
+
+def test_non_finite_thresholds_are_rejected():
+    # Thresholds are persisted as JSON with every eval run, and JSON has no infinity.
+    with pytest.raises(ValueError, match="must be finite"):
+        GateThresholds(min_top_score=float("-inf"))

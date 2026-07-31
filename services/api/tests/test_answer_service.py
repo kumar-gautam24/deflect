@@ -7,8 +7,9 @@ from deflect.models import Chunk
 from deflect.retrieval.pipeline import RetrievalConfig
 
 # Cross-encoder scores are unbounded logits, not 0-1 similarities: real queries
-# range from about -11 to +8. Only an infinite floor is genuinely permissive.
-PERMISSIVE = GateThresholds(min_top_score=float("-inf"), min_margin=float("-inf"))
+# range from about -12 to +8. A large finite floor is effectively permissive, and
+# unlike -inf it survives being persisted as JSON with the eval run.
+PERMISSIVE = GateThresholds(min_top_score=-1e9, min_margin=-1e9)
 
 
 async def test_answer_includes_citations_for_the_chunks_the_model_used(

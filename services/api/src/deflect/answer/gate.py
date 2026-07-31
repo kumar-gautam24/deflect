@@ -1,5 +1,6 @@
 """Decides whether an answer is trustworthy enough to show, or must be escalated."""
 
+import math
 from dataclasses import dataclass
 
 from deflect.retrieval.search import Hit
@@ -10,6 +11,14 @@ class GateThresholds:
     min_top_score: float = 0.0
     min_margin: float = 0.0
     require_grounded: bool = True
+
+    def __post_init__(self) -> None:
+        # Every eval run persists its thresholds as JSON so the run can be
+        # reproduced, and JSON has no infinity. Rejecting it here gives a clear
+        # error instead of an opaque failure at insert time.
+        for name in ("min_top_score", "min_margin"):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite, got {getattr(self, name)}")
 
 
 @dataclass(frozen=True)
