@@ -847,10 +847,14 @@ async def ingest_directory(session: AsyncSession, root: Path, commit_sha: str) -
     for path in sorted(root.rglob("*.md")):
         source = path.read_text(encoding="utf-8")
         chunks = chunk_markdown(source)
+        relative = str(path.relative_to(root))
+
+        # A file that no longer yields chunks contributes nothing to retrieval, so a
+        # document previously ingested from it is dropped rather than left stale.
         if not chunks:
+            await session.execute(delete(Document).where(Document.source_path == relative))
             continue
 
-        relative = str(path.relative_to(root))
         document = await _upsert_document(session, relative, chunks[0].heading_path, commit_sha)
 
         embeddings = embed_texts([c.text for c in chunks])
