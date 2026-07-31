@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.8"]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "pytest-env>=1.1", "ruff>=0.8"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -26,6 +26,10 @@ testpaths = ["tests"]
 # deflect.db never hands a connection born on one loop to a test on another.
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
+# Retrieval tests assert which chunk ranks first, which only holds against a corpus
+# they control. The development database holds the ingested FastAPI docs, so tests
+# get their own database rather than competing with thousands of real chunks.
+env = ["DATABASE_URL=postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_test"]
 
 [tool.ruff]
 line-length = 100
