@@ -1333,7 +1333,6 @@ def rerank(query: str, hits: list[Hit], limit: int) -> list[Hit]:
 # services/api/src/deflect/retrieval/pipeline.py
 """Retrieval stage orchestration. Stages are toggleable so the ablation is reproducible."""
 
-import asyncio
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1356,13 +1355,16 @@ async def retrieve(session: AsyncSession, query: str, config: RetrievalConfig) -
     if not (config.use_dense or config.use_lexical):
         raise ValueError("at least one of use_dense or use_lexical must be enabled")
 
-    searches = []
+    # Run sequentially, not with asyncio.gather. An AsyncSession does not permit
+    # concurrent operations: two queries racing to provision its connection raises
+    # InvalidRequestError. Both searches are index-backed and fast, so the ordering
+    # costs little, and sharing one session is what lets callers see uncommitted rows.
+    rankings: list[list[Hit]] = []
     if config.use_dense:
-        searches.append(dense_search(session, query, config.candidate_limit))
+        rankings.append(await dense_search(session, query, config.candidate_limit))
     if config.use_lexical:
-        searches.append(lexical_search(session, query, config.candidate_limit))
+        rankings.append(await lexical_search(session, query, config.candidate_limit))
 
-    rankings: list[list[Hit]] = await asyncio.gather(*searches)
     fused = reciprocal_rank_fusion(rankings)
 
     if config.use_rerank:
@@ -1796,7 +1798,7 @@ def response(answer: str, cited: list[int], grounded: bool = True) -> str:
     return json.dumps({"answer": answer, "cited_chunk_ids": cited, "grounded": grounded})
 
 
-PERMISSIVE = GateThresholds(min_top_score=-1.0, min_margin=-1.0)
+PERMISSIVE = GateThresholds(min_top_score=float("-inf"), min_margin=float("-inf"))
 
 
 async def test_answer_includes_citations_for_the_chunks_the_model_used(session, corpus):
@@ -2284,7 +2286,7 @@ from deflect.telemetry import record_trace
 router = APIRouter()
 
 # Chosen in Task 20 from the swept deflection-rate curve.
-THRESHOLDS = GateThresholds(min_top_score=0.5, min_margin=0.05)
+THRESHOLDS = GateThresholds(min_top_score=2.0, min_margin=0.0)
 
 
 class AskRequest(BaseModel):
@@ -2824,7 +2826,7 @@ from deflect.llm.fake import FakeClient
 from deflect.models import EvalResult, EvalRun
 from deflect.retrieval.pipeline import RetrievalConfig
 
-PERMISSIVE = GateThresholds(min_top_score=-1.0, min_margin=-1.0)
+PERMISSIVE = GateThresholds(min_top_score=float("-inf"), min_margin=float("-inf"))
 
 
 def answer_response(text: str, grounded: bool = True) -> str:
@@ -4131,7 +4133,10 @@ from deflect.db import SessionFactory
 from deflect.evals.dataset import load_dataset
 from deflect.retrieval.pipeline import RetrievalConfig, retrieve
 
-CANDIDATES = [round(0.1 * i, 2) for i in range(0, 10)]
+# Cross-encoder scores are unbounded logits, not 0-1 similarities. Measured on the
+# real corpus: answerable questions score +5.9 to +7.4, an off-topic question about
+# pricing scores -0.1, and a wholly unrelated one scores -10.4. The sweep spans that.
+CANDIDATES = [round(-12 + 1.0 * i, 1) for i in range(0, 21)]
 
 
 async def main(dataset: Path) -> None:

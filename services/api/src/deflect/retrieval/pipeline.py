@@ -1,6 +1,5 @@
 """Retrieval stage orchestration. Stages are toggleable so the ablation is reproducible."""
 
-import asyncio
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,13 +22,16 @@ async def retrieve(session: AsyncSession, query: str, config: RetrievalConfig) -
     if not (config.use_dense or config.use_lexical):
         raise ValueError("at least one of use_dense or use_lexical must be enabled")
 
-    searches = []
+    # Run sequentially, not with asyncio.gather. An AsyncSession does not permit
+    # concurrent operations: two queries racing to provision its connection raises
+    # InvalidRequestError. Both searches are index-backed and fast, so the ordering
+    # costs little, and sharing one session is what lets callers see uncommitted rows.
+    rankings: list[list[Hit]] = []
     if config.use_dense:
-        searches.append(dense_search(session, query, config.candidate_limit))
+        rankings.append(await dense_search(session, query, config.candidate_limit))
     if config.use_lexical:
-        searches.append(lexical_search(session, query, config.candidate_limit))
+        rankings.append(await lexical_search(session, query, config.candidate_limit))
 
-    rankings: list[list[Hit]] = await asyncio.gather(*searches)
     fused = reciprocal_rank_fusion(rankings)
 
     if config.use_rerank:
