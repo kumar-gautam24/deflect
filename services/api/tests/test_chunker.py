@@ -22,16 +22,18 @@ def test_sibling_heading_replaces_rather_than_nests():
 
 
 def test_oversized_section_splits_with_overlap():
-    source = "# Long\n\n" + ("word " * 600)
+    # Distinct tokens matter: with repeated filler, a tail slice recurs by chance
+    # everywhere and the overlap assertion below would pass even with no overlap.
+    body = " ".join(f"w{i}" for i in range(200))
 
-    chunks = chunk_markdown(source, max_chars=400, overlap_chars=50)
+    chunks = chunk_markdown(f"# Long\n\n{body}\n", max_chars=400, overlap_chars=50)
 
     assert len(chunks) > 1
     assert all(c.heading_path == "Long" for c in chunks)
     assert all(len(c.text) <= 400 for c in chunks)
-    # The tail of one chunk reappears at the head of the next so a sentence split
-    # across the boundary is still retrievable from at least one chunk.
-    assert chunks[0].text[-20:] in chunks[1].text
+    # The tail of one chunk is carried into the head of the next, so a sentence
+    # split across the boundary is still retrievable from at least one chunk.
+    assert chunks[0].text[-50:] == chunks[1].text[:50]
 
 
 def test_sections_without_body_are_dropped():
