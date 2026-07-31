@@ -22,6 +22,10 @@ dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.8"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# All tests share one event loop so the module-level asyncpg pool in
+# deflect.db never hands a connection born on one loop to a test on another.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 
 [tool.ruff]
 line-length = 100
