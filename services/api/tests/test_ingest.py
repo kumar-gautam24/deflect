@@ -58,3 +58,19 @@ async def test_reingest_replaces_previous_chunks_for_a_document(session, tmp_pat
     ).scalars().all()
     assert len(texts) == 1
     assert "revised" in texts[0]
+
+
+async def test_reingest_drops_a_document_whose_content_no_longer_chunks(
+    session, tmp_path: Path
+):
+    path = tmp_path / "b.md"
+    path.write_text("# B\n\noriginal\n")
+    await ingest_directory(session, tmp_path, commit_sha="sha1")
+
+    path.write_text("# B\n")
+    await ingest_directory(session, tmp_path, commit_sha="sha2")
+
+    document = (
+        await session.execute(select(Document).where(Document.source_path == "b.md"))
+    ).scalar_one_or_none()
+    assert document is None
