@@ -1551,6 +1551,8 @@ Pure function. Threshold *values* are chosen in Task 20 from the swept curve; th
 
 ```python
 # services/api/tests/test_gate.py
+import pytest
+
 from deflect.answer.gate import GateThresholds, evaluate_gate
 from deflect.retrieval.search import Hit
 
@@ -1610,8 +1612,6 @@ def test_decision_reports_the_signals_it_used():
     assert decision.top_score == 0.9
     assert decision.margin == pytest.approx(0.5)
 ```
-
-Add `import pytest` at the top of the test file for `pytest.approx`.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -2010,7 +2010,84 @@ async def test_escalated_answer_writes_an_escalation_row(session, corpus, escala
     assert escalation.reason == "ungrounded_answer"
 ```
 
-Add fixtures to `conftest.py` that build an app with `get_session` and the LLM client dependency overridden to the test session and a `FakeClient`. The `corpus` fixture is the one from Task 10, moved into `conftest.py` so both test modules share it.
+Move the `corpus` fixture from Task 10's test module into `conftest.py` so both modules share it, and add the app-building fixtures:
+
+```python
+# append to services/api/tests/conftest.py
+import json
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import select
+
+from deflect.db import get_session
+from deflect.ingest.embedder import embed_texts
+from deflect.llm.base import get_client
+from deflect.llm.fake import FakeClient
+from deflect.main import app as fastapi_app
+from deflect.models import Chunk, Document
+
+
+@pytest_asyncio.fixture
+async def corpus(session):
+    document = Document(source_path="deps.md", title="Dependencies", commit_sha="sha")
+    session.add(document)
+    await session.flush()
+
+    texts = [
+        "Use Depends to declare a dependency in a path operation function.",
+        "Deploy behind a reverse proxy such as nginx.",
+    ]
+    session.add_all(
+        Chunk(
+            document_id=document.id,
+            heading_path=f"Dependencies > {i}",
+            text=text,
+            embedding=embedding,
+            position=i,
+        )
+        for i, (text, embedding) in enumerate(zip(texts, embed_texts(texts), strict=True))
+    )
+    await session.flush()
+    return document
+
+
+def _answer(text: str, cited: list[int], grounded: bool) -> str:
+    return json.dumps({"answer": text, "cited_chunk_ids": cited, "grounded": grounded})
+
+
+def _app_with(session, client):
+    """Bind the app to the test transaction and a scripted client.
+
+    The commit inside the ask route would end the test transaction, so it is
+    neutralized here; the outer fixture rollback is what cleans up.
+    """
+    session.commit = session.flush
+    fastapi_app.dependency_overrides[get_session] = lambda: session
+    fastapi_app.dependency_overrides[get_client] = lambda: client
+    return fastapi_app
+
+
+@pytest.fixture
+def app_with_session(session):
+    yield _app_with(session, FakeClient([]))
+    fastapi_app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def fake_client_app(session, corpus):
+    chunk_id = (await session.execute(select(Chunk.id))).scalars().first()
+    yield _app_with(session, FakeClient([_answer("Use Depends.", [chunk_id], True)]))
+    fastapi_app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def escalating_app(session, corpus):
+    yield _app_with(session, FakeClient([_answer("Invented.", [], False)]))
+    fastapi_app.dependency_overrides.clear()
+```
+
+`THRESHOLDS` in the ask route must be permissive enough that `fake_client_app` does not escalate on the two-chunk corpus. If it does, the test corpus needs a clearer top hit rather than a weakened threshold — the threshold is production configuration and is set in Task 20.
 
 - [ ] **Step 2: Run tests to verify they fail**
 
@@ -2021,9 +2098,13 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'deflect.telemetry'`
 
 ```python
 # append to services/api/src/deflect/models.py
-from datetime import datetime
+from datetime import UTC, datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, func
+from sqlalchemy import JSON, Boolean, DateTime, Float
+
+# created_at is set Python-side rather than by a server default so the value is
+# readable immediately after flush. Tests run inside a rolled-back transaction and
+# never refresh, and a server default would leave the attribute unpopulated there.
 
 
 class Trace(Base):
@@ -2043,7 +2124,9 @@ class Trace(Base):
     model: Mapped[str] = mapped_column(String(128))
     prompt_version: Mapped[str] = mapped_column(String(64))
     latency_ms: Mapped[int] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
 
 
 class Escalation(Base):
@@ -2053,7 +2136,9 @@ class Escalation(Base):
     trace_id: Mapped[int] = mapped_column(ForeignKey("traces.id", ondelete="CASCADE"))
     question: Mapped[str] = mapped_column(Text)
     reason: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
 ```
 
 Generate the migration: `uv run alembic revision --autogenerate -m "traces and escalations"`, then review the produced file and rename it `0002_traces_and_escalations.py`.
@@ -2795,7 +2880,9 @@ class EvalRun(Base):
     thresholds: Mapped[dict] = mapped_column(JSON)
     item_count: Mapped[int] = mapped_column(Integer)
     metrics: Mapped[dict] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
 
 
 class EvalResult(Base):
@@ -2830,9 +2917,9 @@ from dataclasses import asdict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deflect.answer.gate import GateThresholds
-from deflect.answer.service import answer_question
+from deflect.answer.service import AnswerResult, answer_question
 from deflect.evals.dataset import GoldenItem
-from deflect.evals.judge import JUDGE_VERSION, judge_answer
+from deflect.evals.judge import JUDGE_VERSION, JudgeScores, judge_answer
 from deflect.evals.metrics import hit_at_k, mrr
 from deflect.llm.base import LLMClient
 from deflect.models import EvalResult, EvalRun
@@ -2873,11 +2960,32 @@ async def run_evals(
     thresholds: GateThresholds,
     git_sha: str,
 ) -> EvalRun:
+    if not items:
+        raise ValueError("cannot run evals over an empty dataset")
+
+    # Every item is scored before the run row is built, so the run is written once
+    # with its real prompt version, model, and metrics rather than being inserted
+    # empty and patched as the loop proceeds.
+    scored: list[tuple[GoldenItem, AnswerResult, JudgeScores | None]] = []
+    for item in items:
+        outcome = await answer_question(
+            session, item.question, answer_client, retrieval_config, thresholds
+        )
+        # Judging a refusal wastes tokens: there is no answer to score, and the
+        # escalation metrics already capture whether refusing was correct.
+        scores = (
+            None
+            if outcome.decision.escalate
+            else await judge_answer(judge_client, item, outcome.answer, outcome.hits)
+        )
+        scored.append((item, outcome, scores))
+
+    _, first_outcome, _ = scored[0]
     run = EvalRun(
         git_sha=git_sha,
-        prompt_version="",
+        prompt_version=first_outcome.prompt_version,
         judge_version=JUDGE_VERSION,
-        model="",
+        model=first_outcome.model,
         retrieval_config=asdict(retrieval_config),
         thresholds=asdict(thresholds),
         item_count=len(items),
@@ -2886,37 +2994,26 @@ async def run_evals(
     session.add(run)
     await session.flush()
 
-    results: list[EvalResult] = []
-    for item in items:
-        outcome = await answer_question(
-            session, item.question, answer_client, retrieval_config, thresholds
-        )
-        run.prompt_version = outcome.prompt_version
-        run.model = outcome.model
-
-        sources = [hit.source_path for hit in outcome.hits]
-        scores = None
-        # Judging a refusal wastes tokens: there is no answer to score, and the
-        # escalation metrics already capture whether refusing was correct.
-        if not outcome.decision.escalate:
-            scores = await judge_answer(judge_client, item, outcome.answer, outcome.hits)
-
-        result = EvalResult(
+    results = [
+        EvalResult(
             run_id=run.id,
             item_id=item.id,
             question=item.question,
             answer=outcome.answer,
             escalated=outcome.decision.escalate,
             expected_escalate=item.should_escalate,
-            retrieved_sources=sources,
-            hit_at_5=hit_at_k(sources, item.expected_sources, k=5),
-            mrr=mrr(sources, item.expected_sources),
+            retrieved_sources=[hit.source_path for hit in outcome.hits],
+            hit_at_5=hit_at_k(
+                [hit.source_path for hit in outcome.hits], item.expected_sources, k=5
+            ),
+            mrr=mrr([hit.source_path for hit in outcome.hits], item.expected_sources),
             faithfulness=scores.faithfulness if scores else None,
             answer_relevance=scores.answer_relevance if scores else None,
             context_relevance=scores.context_relevance if scores else None,
             rationale=scores.rationale if scores else None,
         )
-        results.append(result)
+        for item, outcome, scores in scored
+    ]
 
     session.add_all(results)
     run.metrics = _aggregate(results)
