@@ -1268,7 +1268,7 @@ async def test_disabling_lexical_still_returns_results(session, corpus):
     assert len(hits) == 3
 
 
-async def test_hybrid_finds_exact_token_that_dense_alone_ranks_poorly(session, corpus):
+async def test_lexical_adds_rank_mass_that_dense_alone_does_not(session, corpus):
     dense_only = RetrievalConfig(use_lexical=False, use_rerank=False, final_limit=1)
     hybrid = RetrievalConfig(use_rerank=False, final_limit=1)
 
@@ -1276,7 +1276,10 @@ async def test_hybrid_finds_exact_token_that_dense_alone_ranks_poorly(session, c
     hybrid_hits = await retrieve(session, "422", hybrid)
 
     assert "422" in hybrid_hits[0].text
-    assert dense_hits[0].chunk_id != hybrid_hits[0].chunk_id or "422" in dense_hits[0].text
+    # On a fixture this small dense search already ranks the exact-token chunk first,
+    # so the observable effect of enabling lexical search is the fused score, not the
+    # ordering. Whether it changes ordering is what the corpus-wide ablation measures.
+    assert hybrid_hits[0].score > dense_hits[0].score
 
 
 async def test_disabling_every_strategy_is_rejected(session, corpus):
