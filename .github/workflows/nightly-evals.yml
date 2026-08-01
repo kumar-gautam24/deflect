@@ -8,38 +8,38 @@ on:
 jobs:
   full-evals:
     runs-on: ubuntu-latest
-    services:
-      db:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: deflect
-          POSTGRES_PASSWORD: deflect
-          POSTGRES_DB: deflect
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U deflect"
-          --health-interval 5s --health-retries 10
-    env:
-      DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-    defaults:
-      run:
-        working-directory: services/api
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - run: uv sync
-      - run: uv run alembic upgrade head
-      - name: Ingest the pinned corpus
+      - run: docker compose up -d --build
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Wait for every service to report healthy
+        run: |
+          for port in 8001 8002 8003; do
+            for attempt in $(seq 1 60); do
+              curl -sf "http://localhost:$port/health" && break
+              sleep 5
+            done
+          done
+
+      - name: Migrate and ingest the pinned corpus
         run: |
           git clone --depth 1 https://github.com/fastapi/fastapi /tmp/fastapi-src
-          uv run python scripts/ingest.py /tmp/fastapi-src/docs/en/docs \
-            "$(git -C /tmp/fastapi-src rev-parse HEAD)"
+          docker compose exec -T retrieval alembic upgrade head
+          docker compose exec -T answer alembic upgrade head
+          docker compose exec -T evals alembic upgrade head
+          docker compose cp /tmp/fastapi-src/docs/en/docs retrieval:/corpus
+          curl -sf -X POST http://localhost:8001/ingest \
+            -H 'Content-Type: application/json' \
+            -d "{\"root\": \"/corpus\", \"commit_sha\": \"$(git -C /tmp/fastapi-src rev-parse HEAD)\"}"
 
       - name: Full golden dataset
-        run: uv run python scripts/run_evals.py --fail-under 0.85
+        run: |
+          curl -sf -X POST http://localhost:8003/runs \
+            -H 'Content-Type: application/json' \
+            -d '{"fail_under": 0.85}'
 
-      - name: Retrieval ablation
-        run: uv run python scripts/ablate.py
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose logs --tail 100

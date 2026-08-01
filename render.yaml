@@ -1,16 +1,48 @@
+# Three services, three databases. Each owns its own schema and migrations; none
+# reads another's tables.
 services:
   - type: web
-    name: deflect-api
+    name: deflect-retrieval
     runtime: docker
-    dockerfilePath: ./services/api/Dockerfile
-    dockerContext: ./services/api
+    dockerfilePath: ./services/retrieval/Dockerfile
+    dockerContext: .
     healthCheckPath: /health
     envVars:
-      # Neon pooled connection string, with the driver prefix the app expects:
-      # postgresql+asyncpg://...
+      - key: DATABASE_URL
+        sync: false
+
+  - type: web
+    name: deflect-answer
+    runtime: docker
+    dockerfilePath: ./services/answer/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
       - key: DATABASE_URL
         sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: WEB_ORIGIN
         sync: false
+      - key: RETRIEVAL_URL
+        fromService:
+          name: deflect-retrieval
+          type: web
+          property: hostport
+
+  - type: web
+    name: deflect-evals
+    runtime: docker
+    dockerfilePath: ./services/evals/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ANSWER_URL
+        fromService:
+          name: deflect-answer
+          type: web
+          property: hostport

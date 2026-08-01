@@ -2,13 +2,15 @@ name: ci
 
 on: [push, pull_request]
 
-env:
-  DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect
-  CORPUS_DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect
-
 jobs:
-  api:
+  # One job per service. They share no state, so a failure names the service that
+  # broke rather than "the backend".
+  service:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [retrieval, answer, evals]
     services:
       db:
         image: pgvector/pgvector:pg16
@@ -20,9 +22,12 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U deflect"
           --health-interval 5s --health-retries 10
+    env:
+      PGPASSWORD: deflect
+      DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_${{ matrix.service }}
     defaults:
       run:
-        working-directory: services/api
+        working-directory: services/${{ matrix.service }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -30,28 +35,34 @@ jobs:
           enable-cache: true
       - run: uv sync
 
-      - name: Create the test database
-        run: psql "postgresql://deflect:deflect@localhost:5432/postgres" -c "CREATE DATABASE deflect_test"
-        env:
-          PGPASSWORD: deflect
+      - name: Create this service's databases
+        run: |
+          psql "postgresql://deflect:deflect@localhost:5432/postgres" \
+            -c "CREATE DATABASE deflect_${{ matrix.service }}"
+          psql "postgresql://deflect:deflect@localhost:5432/postgres" \
+            -c "CREATE DATABASE deflect_${{ matrix.service }}_test"
 
       - run: uv run alembic upgrade head
       - name: Migrate the test database
         run: uv run alembic upgrade head
         env:
-          DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_test
+          DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_${{ matrix.service }}_test
 
       - run: uv run ruff check .
-
-      # The golden dataset names real document paths, and a test verifies every one
-      # of them against the ingested corpus. That check is the reason CI ingests.
-      - name: Ingest the pinned corpus
-        run: |
-          git clone --depth 1 https://github.com/fastapi/fastapi /tmp/fastapi-src
-          uv run python scripts/ingest.py /tmp/fastapi-src/docs/en/docs \
-            "$(git -C /tmp/fastapi-src rev-parse HEAD)"
-
       - run: uv run pytest -q
+
+  contracts:
+    # The wire schemas are the coupling point between services. If they stop
+    # importing cleanly, every service is broken at once.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/common
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --with pydantic --with google-genai --with httpx python -c "import sys; sys.path.insert(0, 'src'); import deflect_common.schemas as s; print(sorted(n for n in dir(s) if n[0].isupper()))"
+      - run: uv run --with ruff ruff check .
 
   web:
     runs-on: ubuntu-latest
@@ -73,36 +84,41 @@ jobs:
   eval-smoke:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    services:
-      db:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: deflect
-          POSTGRES_PASSWORD: deflect
-          POSTGRES_DB: deflect
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U deflect"
-          --health-interval 5s --health-retries 10
-    env:
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-    defaults:
-      run:
-        working-directory: services/api
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-      - run: uv sync
-      - run: uv run alembic upgrade head
-      - name: Ingest the pinned corpus
+      - name: Bring up the whole stack
+        run: docker compose up -d --build
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+
+      - name: Wait for every service to report healthy
+        run: |
+          for port in 8001 8002 8003; do
+            for attempt in $(seq 1 60); do
+              curl -sf "http://localhost:$port/health" && break
+              sleep 5
+            done
+          done
+
+      - name: Migrate and ingest the pinned corpus
         run: |
           git clone --depth 1 https://github.com/fastapi/fastapi /tmp/fastapi-src
-          uv run python scripts/ingest.py /tmp/fastapi-src/docs/en/docs \
-            "$(git -C /tmp/fastapi-src rev-parse HEAD)"
+          docker compose exec -T retrieval alembic upgrade head
+          docker compose exec -T answer alembic upgrade head
+          docker compose exec -T evals alembic upgrade head
+          docker compose cp /tmp/fastapi-src/docs/en/docs retrieval:/corpus
+          curl -sf -X POST http://localhost:8001/ingest \
+            -H 'Content-Type: application/json' \
+            -d "{\"root\": \"/corpus\", \"commit_sha\": \"$(git -C /tmp/fastapi-src rev-parse HEAD)\"}"
 
       # Fails the build when faithfulness regresses. This is the gate: a prompt
       # change that makes answers less grounded cannot merge.
       - name: Eval smoke set
-        run: uv run python scripts/run_evals.py --limit 10 --fail-under 0.85
+        run: |
+          curl -sf -X POST http://localhost:8003/runs \
+            -H 'Content-Type: application/json' \
+            -d '{"limit": 10, "fail_under": 0.85}'
+
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose logs --tail 100
