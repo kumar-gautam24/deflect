@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: deflect-api
+    runtime: docker
+    dockerfilePath: ./services/api/Dockerfile
+    dockerContext: ./services/api
+    healthCheckPath: /health
+    envVars:
+      # Neon pooled connection string, with the driver prefix the app expects:
+      # postgresql+asyncpg://...
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: WEB_ORIGIN
+        sync: false

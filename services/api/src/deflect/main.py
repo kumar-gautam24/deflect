@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from deflect.config import get_settings
 from deflect.db import SessionDep
 from deflect.routes import ask, evals, traces
 
@@ -9,7 +10,7 @@ app = FastAPI(title="Deflect")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[o.strip() for o in get_settings().web_origin.split(",")],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )

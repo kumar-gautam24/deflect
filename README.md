@@ -165,6 +165,24 @@ npm install
 npm run dev
 ```
 
+## Deploying
+
+Two deployable units and one database. The API is a modular monolith rather than a set
+of microservices: the eval harness calls the answer pipeline as a function, which is
+what guarantees evals and production run the same code, and splitting retrieval across
+a network would add failure modes to solve a scaling problem this corpus does not have.
+
+1. **Neon** — create a project, run `CREATE EXTENSION vector`, then apply migrations
+   against it with `DATABASE_URL=... uv run alembic upgrade head` and ingest the corpus.
+2. **Render** — deploy from `render.yaml`. Set `DATABASE_URL` (Neon pooled string, with
+   the `postgresql+asyncpg://` prefix), `GEMINI_API_KEY`, and `WEB_ORIGIN` to the Vercel
+   domain. Confirm `/health` returns `{"status": "ok", "database": "connected"}`.
+3. **Vercel** — deploy `apps/web` with `API_URL` and `NEXT_PUBLIC_API_URL` set to the
+   Render URL.
+
+`WEB_ORIGIN` is what the API's CORS allowlist reads, so the deployed frontend needs to
+be named there or browser requests are rejected.
+
 Set `GEMINI_API_KEY` in `.env` to answer questions and run evals. Everything else,
 including the ablation and the threshold sweep, runs without a model provider.
 

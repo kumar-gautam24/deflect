@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+asyncpg://deflect:deflect@localhost:5432/deflect"
+    # Comma separated so the deployed origin can be added without a code change.
+    web_origin: str = "http://localhost:3000"
     gemini_api_key: str = ""
     llm_provider: str = "gemini"
     generation_model: str = "gemini-2.0-flash"
