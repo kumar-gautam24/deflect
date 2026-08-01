@@ -1,10 +1,10 @@
 import { TraceRow } from "@/components/trace-row";
-import { type TraceSummary, getJSON } from "@/lib/api";
+import { type TraceSummary, getFromAnswer } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
 export default async function TracesPage() {
-  const traces = await getJSON<TraceSummary[]>("/traces");
+  const traces = await getFromAnswer<TraceSummary[]>("/traces");
 
   return (
     <main className="mx-auto max-w-4xl space-y-6 p-8">

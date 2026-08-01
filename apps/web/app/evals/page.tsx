@@ -1,14 +1,14 @@
 import { RunDiff, type DiffResponse } from "@/components/run-diff";
 import { RunTable } from "@/components/run-table";
-import { type EvalRunSummary, getJSON } from "@/lib/api";
+import { type EvalRunSummary, getFromEvals } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
 export default async function EvalsPage() {
-  const runs = await getJSON<EvalRunSummary[]>("/eval-runs");
+  const runs = await getFromEvals<EvalRunSummary[]>("/eval-runs");
   const diff =
     runs.length >= 2
-      ? await getJSON<DiffResponse>(`/eval-runs/diff?base=${runs[1].id}&head=${runs[0].id}`)
+      ? await getFromEvals<DiffResponse>(`/eval-runs/diff?base=${runs[1].id}&head=${runs[0].id}`)
       : null;
 
   return (

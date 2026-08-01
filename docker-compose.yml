@@ -12,16 +12,49 @@ services:
       retries: 10
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./scripts/create-databases.sql:/docker-entrypoint-initdb.d/10-databases.sql:ro
 
-  api:
-    build: ./services/api
+  retrieval:
+    build:
+      context: .
+      dockerfile: services/retrieval/Dockerfile
     environment:
-      DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
-    ports: ["8000:8000"]
+      DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_retrieval
+    ports: ["8001:8001"]
     depends_on:
       db:
         condition: service_healthy
+
+  answer:
+    build:
+      context: .
+      dockerfile: services/answer/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_answer
+      RETRIEVAL_URL: http://retrieval:8001
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+    ports: ["8002:8002"]
+    depends_on:
+      db:
+        condition: service_healthy
+      retrieval:
+        condition: service_started
+
+  evals:
+    build:
+      context: .
+      dockerfile: services/evals/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_evals
+      ANSWER_URL: http://answer:8002
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    ports: ["8003:8003"]
+    depends_on:
+      db:
+        condition: service_healthy
+      answer:
+        condition: service_started
 
 volumes:
   pgdata:
