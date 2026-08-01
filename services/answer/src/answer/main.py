@@ -1,0 +1,123 @@
+import asyncio
+import json
+from collections.abc import AsyncIterator
+from typing import Annotated
+
+from deflect_common.llm.base import LLMClient, get_client
+from deflect_common.schemas import AnswerRequest, AnswerResponse
+from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select, text
+
+from answer.config import get_settings
+from answer.db import SessionDep
+from answer.models import Trace
+from answer.retrieval_client import RetrievalClient
+from answer.service import answer_question
+
+app = FastAPI(title="Deflect answer")
+router = APIRouter()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in get_settings().web_origin.split(",")],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+
+def build_client() -> LLMClient:
+    settings = get_settings()
+    return get_client(
+        provider=settings.llm_provider,
+        model=settings.generation_model,
+        api_key=settings.gemini_api_key,
+        base_url=settings.ollama_base_url,
+    )
+
+
+def build_retrieval() -> RetrievalClient:
+    return RetrievalClient(get_settings().retrieval_url)
+
+
+ClientDep = Annotated[LLMClient, Depends(build_client)]
+RetrievalDep = Annotated[RetrievalClient, Depends(build_retrieval)]
+
+
+def _serialize(trace: Trace) -> dict:
+    return {
+        "id": trace.id,
+        "question": trace.question,
+        "answer": trace.answer,
+        "escalated": trace.escalated,
+        "reason": trace.reason,
+        "top_score": trace.top_score,
+        "margin": trace.margin,
+        "retrieved": trace.retrieved,
+        "input_tokens": trace.input_tokens,
+        "output_tokens": trace.output_tokens,
+        "cost_usd": trace.cost_usd,
+        "model": trace.model,
+        "prompt_version": trace.prompt_version,
+        "latency_ms": trace.latency_ms,
+        "created_at": trace.created_at.isoformat(),
+    }
+
+
+@router.get("/health")
+async def health(session: SessionDep) -> dict[str, str]:
+    await session.execute(text("select 1"))
+    return {"status": "ok", "database": "connected"}
+
+
+@router.post("/answer")
+async def answer(
+    request: AnswerRequest,
+    session: SessionDep,
+    client: ClientDep,
+    retrieval: RetrievalDep,
+) -> AnswerResponse:
+    result = await answer_question(session, request, client, retrieval)
+    await session.commit()
+    return result
+
+
+@router.post("/ask")
+async def ask(
+    request: AnswerRequest,
+    session: SessionDep,
+    client: ClientDep,
+    retrieval: RetrievalDep,
+) -> StreamingResponse:
+    result = await answer_question(session, request, client, retrieval)
+    await session.commit()
+
+    async def stream() -> AsyncIterator[str]:
+        # The provider returns structured JSON in one call, so streaming is done by
+        # chunking the finished answer. /ask and /answer therefore cannot diverge.
+        for word in result.answer.split(" "):
+            yield f"data: {json.dumps({'type': 'token', 'text': word + ' '})}\n\n"
+            await asyncio.sleep(0)
+
+        done = result.model_dump() | {"type": "done"}
+        yield f"data: {json.dumps(done)}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@router.get("/traces")
+async def list_traces(session: SessionDep) -> list[dict]:
+    statement = select(Trace).order_by(Trace.id.desc()).limit(100)
+    return [_serialize(trace) for trace in (await session.execute(statement)).scalars()]
+
+
+@router.get("/traces/{trace_id}")
+async def get_trace(trace_id: int, session: SessionDep) -> dict:
+    trace = await session.get(Trace, trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail=f"trace {trace_id} not found")
+    return _serialize(trace)
+
+
+app.include_router(router)
