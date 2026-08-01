@@ -49,6 +49,9 @@ export async function* askStream(question: string): AsyncGenerator<AskEvent> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ question }),
   });
+  // An error response still has a body, just no SSE frames in it. Without this check
+  // the loop below would yield nothing and the caller would render a silent blank.
+  if (!response.ok) throw new Error(`the API returned ${response.status}`);
   if (!response.body) throw new Error("ask endpoint returned no body");
 
   const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
