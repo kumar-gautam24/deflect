@@ -3,8 +3,9 @@
 Answers FastAPI support questions from the official documentation with citations, and
 escalates to a human when its own confidence signals say it should not guess.
 
-Next.js, FastAPI, Postgres with pgvector, Gemini for generation and judging, local
-models for embedding and reranking.
+Three FastAPI services with a database each, a Next.js frontend, Postgres with
+pgvector, Gemini for generation and judging, and local models for embedding and
+reranking.
 
 ## Why the refusal matters
 
@@ -23,7 +24,7 @@ in `evals/golden.yaml`. Reproduce them with the scripts named under each table.
 
 ### Retrieval ablation
 
-`services/api/scripts/ablate.py`, over the 65 answerable items.
+`services/evals/scripts/ablate.py`, over the 65 answerable items.
 
 | variant | hit@5 | MRR | precision@5 |
 | --- | --- | --- | --- |
@@ -53,7 +54,7 @@ Three stronger cross-encoders were tried; none beat plain hybrid on MRR:
 
 ### Why the reranker stays anyway
 
-`services/api/scripts/gate_separation.py`
+`services/evals/scripts/gate_separation.py`
 
 | score source | answerable median | unanswerable median | separation |
 | --- | --- | --- | --- |
@@ -75,7 +76,7 @@ sensitive to where it is set.
 
 ### Choosing the operating point
 
-`services/api/scripts/sweep_thresholds.py`. Abridged; the script prints the full sweep
+`services/evals/scripts/sweep_thresholds.py`. Abridged; the script prints the full sweep
 from -8.0 to +8.0.
 
 | min_top_score | answered | wrongly refused | wrongly answered |
@@ -102,25 +103,50 @@ Two caveats that belong with this number rather than buried:
 
 ## Architecture
 
+| service | port | database | owns |
+| --- | --- | --- | --- |
+| `retrieval` | 8001 | `deflect_retrieval` | `documents`, `chunks` |
+| `answer` | 8002 | `deflect_answer` | `traces`, `escalations` |
+| `evals` | 8003 | `deflect_evals` | `eval_runs`, `eval_results` |
+| `web` | 3000 | none | UI and backend-for-frontend |
+
 ```
-apps/web         Next.js: ask, evals and traces surfaces
-services/api     FastAPI
-  ingest/        markdown -> heading-aware chunks -> local embeddings -> pgvector
-  retrieval/     dense + lexical search, RRF fusion, cross-encoder rerank
-  answer/        prompt assembly, citations, confidence gate
-  evals/         golden dataset, metrics, LLM-as-judge, run storage
-  llm/           provider-agnostic client (Gemini, Ollama)
-db               Postgres with pgvector
+web ──/api/ask──> answer ──/search──> retrieval
+                    ^
+evals ──/answer─────┘
 ```
 
-The web app never calls a model. It proxies an SSE stream from the FastAPI service, so
-provider keys stay server-side and the eval harness exercises the same answer code path
-the live app does. An eval that tests a different pipeline than production measures
-nothing.
+Database per service. No shared tables, no cross-service joins, and each service owns
+its own migrations. `packages/common` holds the wire schemas both sides of every call
+import, so a contract change breaks compilation rather than failing at runtime.
+
+The web app never calls a model. It proxies an SSE stream from the answer service, so
+provider keys stay server-side.
 
 Chunking follows markdown headings rather than a fixed window, and each chunk keeps its
 heading path (`Tutorial > Dependencies > Sub-dependencies`) so a citation names
 something a human can navigate to.
+
+### On the split
+
+This started as a modular monolith, still available at the `monolith-phase1` tag. The
+comparison is the interesting part, so both shapes are kept.
+
+**What the split improved.** The monolith's eval harness called the answer function
+directly. That guaranteed evals and production shared a code path, but only because
+both lived in one process. The eval service now calls the same HTTP endpoint a real
+client calls, so the guarantee survives a network boundary instead of depending on
+deployment topology.
+
+**What it cost.** Answering takes an extra hop. Retrieval being unreachable is a new
+failure mode, surfaced as a 503 rather than an answer built on no context — a state
+that was previously impossible. There is no transaction across services, which is
+feasible only because nothing here needs one. And `packages/common` is a coupling
+point: a breaking change there is a coordinated deploy.
+
+**What it did not need.** No service mesh, no Kubernetes, no message broker, no
+distributed tracing backend. Adding infrastructure the system has no use for would
+obscure the parts worth understanding.
 
 ## Evals
 
@@ -145,19 +171,19 @@ faithfulness drops. The full dataset runs nightly.
 ## Running it
 
 ```bash
-docker compose up -d db
-createdb deflect_test  # or: psql -c "CREATE DATABASE deflect_test"
+docker compose up -d --build      # postgres plus all three services
 
-cd services/api
-uv sync
-uv run alembic upgrade head
-DATABASE_URL=...deflect_test uv run alembic upgrade head
+# Migrate each service, then ingest the corpus through the retrieval service.
+for s in retrieval answer evals; do docker compose exec -T $s alembic upgrade head; done
 
 git clone --depth 1 https://github.com/fastapi/fastapi /tmp/fastapi-src
-uv run python scripts/ingest.py /tmp/fastapi-src/docs/en/docs "$(git -C /tmp/fastapi-src rev-parse HEAD)"
-
-uv run uvicorn deflect.main:app --reload
+docker compose cp /tmp/fastapi-src/docs/en/docs retrieval:/corpus
+curl -X POST localhost:8001/ingest -H 'Content-Type: application/json' \
+  -d "{\"root\": \"/corpus\", \"commit_sha\": \"$(git -C /tmp/fastapi-src rev-parse HEAD)\"}"
 ```
+
+The compose file creates a database per service on first start. To run a service
+directly instead, `cd services/<name> && uv sync && uv run uvicorn <name>.main:app`.
 
 ```bash
 cd apps/web
@@ -167,28 +193,30 @@ npm run dev
 
 ## Deploying
 
-Two deployable units and one database. The API is a modular monolith rather than a set
-of microservices: the eval harness calls the answer pipeline as a function, which is
-what guarantees evals and production run the same code, and splitting retrieval across
-a network would add failure modes to solve a scaling problem this corpus does not have.
+1. **Neon** — one database per service. Run `CREATE EXTENSION vector` on the retrieval
+   one only, then apply each service's migrations against its own `DATABASE_URL`.
+2. **Render** — deploy from `render.yaml`. It wires `RETRIEVAL_URL` and `ANSWER_URL`
+   between services; set each `DATABASE_URL` (Neon pooled string, with the
+   `postgresql+asyncpg://` prefix), `GEMINI_API_KEY`, and `WEB_ORIGIN`.
+3. **Vercel** — deploy `apps/web` with `ANSWER_URL` and `EVALS_URL` set to the
+   corresponding Render URLs.
 
-1. **Neon** — create a project, run `CREATE EXTENSION vector`, then apply migrations
-   against it with `DATABASE_URL=... uv run alembic upgrade head` and ingest the corpus.
-2. **Render** — deploy from `render.yaml`. Set `DATABASE_URL` (Neon pooled string, with
-   the `postgresql+asyncpg://` prefix), `GEMINI_API_KEY`, and `WEB_ORIGIN` to the Vercel
-   domain. Confirm `/health` returns `{"status": "ok", "database": "connected"}`.
-3. **Vercel** — deploy `apps/web` with `API_URL` and `NEXT_PUBLIC_API_URL` set to the
-   Render URL.
+`WEB_ORIGIN` is what the answer service's CORS allowlist reads, so the deployed
+frontend must be named there or browser requests are rejected.
 
-`WEB_ORIGIN` is what the API's CORS allowlist reads, so the deployed frontend needs to
-be named there or browser requests are rejected.
-
-Set `GEMINI_API_KEY` in `.env` to answer questions and run evals. Everything else,
-including the ablation and the threshold sweep, runs without a model provider.
+`GEMINI_API_KEY` is required by the answer and evals services, which refuse to start
+without it rather than failing on the first request. The retrieval service needs no
+provider key, and so do the ablation and threshold sweep — every table above was
+produced without one.
 
 ### Tests
 
 ```bash
-cd services/api && uv run pytest      # 89 tests
-cd apps/web && npm test               # 8 tests
+for s in retrieval answer evals; do (cd services/$s && uv run pytest -q); done
+cd apps/web && npm test
 ```
+
+73 service tests and 8 component tests. Each service's suite runs against its own test
+database and needs nothing else: the answer service's tests use a fake retrieval, and
+the eval service's tests use a fake answer service, so neither needs a vector database,
+an embedding model or a provider key. That isolation is a direct benefit of the split.

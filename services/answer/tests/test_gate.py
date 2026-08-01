@@ -1,7 +1,6 @@
 import pytest
+from deflect_common.gate import GateThresholds, evaluate_gate
 from deflect_common.schemas import Hit
-
-from answer.gate import GateThresholds, evaluate_gate
 
 
 def hits(*scores: float) -> list[Hit]:

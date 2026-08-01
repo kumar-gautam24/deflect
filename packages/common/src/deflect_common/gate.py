@@ -1,4 +1,9 @@
-"""Decides whether an answer is trustworthy enough to show, or must be escalated."""
+"""Decides whether an answer is trustworthy enough to show, or must be escalated.
+
+Lives in the shared package because two callers need identical semantics: the answer
+service applies it per request, and the threshold sweep replays it over recorded
+scores. A second implementation in the sweep would be measuring something other than
+what production does."""
 
 import math
 from dataclasses import dataclass

@@ -5,6 +5,7 @@ import json
 import time
 from pathlib import Path
 
+from deflect_common.gate import GateThresholds, evaluate_gate
 from deflect_common.llm.base import LLMClient
 from deflect_common.schemas import (
     AnswerRequest,
@@ -16,7 +17,6 @@ from deflect_common.schemas import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from answer.config import get_settings
-from answer.gate import GateThresholds, evaluate_gate
 from answer.models import Escalation, Trace
 from answer.retrieval_client import RetrievalClient
 from answer.telemetry import estimate_cost
