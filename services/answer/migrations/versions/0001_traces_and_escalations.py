@@ -24,6 +24,8 @@ def upgrade() -> None:
         sa.Column("model", sa.String(128), nullable=False),
         sa.Column("prompt_version", sa.String(64), nullable=False),
         sa.Column("latency_ms", sa.Integer, nullable=False),
+        sa.Column("min_top_score", sa.Float, nullable=False),
+        sa.Column("min_margin", sa.Float, nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
     )
 

@@ -34,6 +34,10 @@ class Trace(Base):
     model: Mapped[str] = mapped_column(String(128))
     prompt_version: Mapped[str] = mapped_column(String(64))
     latency_ms: Mapped[int] = mapped_column(Integer)
+    # The gate configuration in force for this request, so a row explains its own
+    # escalation without needing to know what the service was configured with.
+    min_top_score: Mapped[float] = mapped_column(Float)
+    min_margin: Mapped[float] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

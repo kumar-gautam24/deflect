@@ -61,6 +61,8 @@ def _serialize(trace: Trace) -> dict:
         "model": trace.model,
         "prompt_version": trace.prompt_version,
         "latency_ms": trace.latency_ms,
+        "min_top_score": trace.min_top_score,
+        "min_margin": trace.min_margin,
         "created_at": trace.created_at.isoformat(),
     }
 

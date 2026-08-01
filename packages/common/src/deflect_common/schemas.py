@@ -69,6 +69,10 @@ class AnswerResponse(BaseModel):
     model: str
     prompt_version: str
     latency_ms: int
+    # The gate configuration that produced this result. Reported rather than assumed
+    # so an eval run can record what it actually measured against.
+    min_top_score: float
+    min_margin: float
 
 
 class RunEvalsRequest(BaseModel):

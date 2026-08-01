@@ -67,7 +67,8 @@ async def answer_question(
     completion = await client.complete(prompt, schema=RESPONSE_SCHEMA)
     payload = json.loads(completion.text)
 
-    decision = evaluate_gate(hits, grounded=payload["grounded"], thresholds=_thresholds(request))
+    thresholds = _thresholds(request)
+    decision = evaluate_gate(hits, grounded=payload["grounded"], thresholds=thresholds)
 
     # Citations are resolved against retrieved chunks, so a hallucinated id cannot
     # produce a citation that links nowhere.
@@ -106,6 +107,8 @@ async def answer_question(
         model=completion.model,
         prompt_version=PROMPT_VERSION,
         latency_ms=latency_ms,
+        min_top_score=thresholds.min_top_score,
+        min_margin=thresholds.min_margin,
     )
     session.add(trace)
     await session.flush()
@@ -131,4 +134,6 @@ async def answer_question(
         model=completion.model,
         prompt_version=PROMPT_VERSION,
         latency_ms=latency_ms,
+        min_top_score=thresholds.min_top_score,
+        min_margin=thresholds.min_margin,
     )
