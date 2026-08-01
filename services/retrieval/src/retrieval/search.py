@@ -42,7 +42,7 @@ async def dense_search(session: AsyncSession, query: str, limit: int) -> list[Hi
 
 async def lexical_search(session: AsyncSession, query: str, limit: int) -> list[Hit]:
     tsquery = func.plainto_tsquery("english", query)
-    rank = func.ts_rank(func.to_tsvector("english", Chunk.text), tsquery)
+    rank = func.ts_rank(Chunk.text_search, tsquery)
     statement = (
         select(
             Chunk.id,
@@ -53,7 +53,7 @@ async def lexical_search(session: AsyncSession, query: str, limit: int) -> list[
             rank.label("score"),
         )
         .join(Document, Document.id == Chunk.document_id)
-        .where(func.to_tsvector("english", Chunk.text).op("@@")(tsquery))
+        .where(Chunk.text_search.op("@@")(tsquery))
         .order_by(rank.desc())
         .limit(limit)
     )

@@ -15,12 +15,16 @@ def hit(chunk_id: int, score: float = 0.0) -> Hit:
 
 
 def test_chunk_ranked_highly_by_both_strategies_wins():
-    dense = [hit(1), hit(2), hit(3)]
-    lexical = [hit(3), hit(1), hit(4)]
+    # Chunk 2 is second in both lists; chunk 1 is first in one and last in the other.
+    # Consistent agreement should beat one strong showing, and chunk 2 can only win by
+    # accumulating across both. Insertion order favours chunk 1, so returning the
+    # first-seen chunk fails this.
+    dense = [hit(1), hit(2), hit(3), hit(4), hit(5)]
+    lexical = [hit(5), hit(2), hit(4), hit(3), hit(1)]
 
     fused = reciprocal_rank_fusion([dense, lexical])
 
-    assert fused[0].chunk_id == 1
+    assert fused[0].chunk_id == 2
 
 
 def test_scores_are_fused_ranks_not_input_scores():
@@ -36,9 +40,11 @@ def test_result_is_deduplicated_by_chunk_id():
 
 
 def test_output_is_sorted_by_descending_score():
-    fused = reciprocal_rank_fusion([[hit(1), hit(2), hit(3)]])
+    # The weakest input is presented first, so returning insertion order would fail.
+    # Comparing the result against its own sorted copy would pass either way.
+    fused = reciprocal_rank_fusion([[hit(3)], [hit(2)], [hit(2)], [hit(1)], [hit(1)], [hit(1)]])
 
-    assert [h.score for h in fused] == sorted([h.score for h in fused], reverse=True)
+    assert [h.chunk_id for h in fused] == [1, 2, 3]
 
 
 def test_empty_ranking_lists_are_ignored():
