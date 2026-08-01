@@ -13,7 +13,8 @@ def _model() -> TextEmbedding:
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    return [vector.tolist() for vector in _model().embed(texts)]
+    batch_size = get_settings().embedding_batch_size
+    return [vector.tolist() for vector in _model().embed(texts, batch_size=batch_size)]
 
 
 def embed_query(text: str) -> list[float]:

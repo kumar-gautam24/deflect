@@ -11,7 +11,7 @@ import httpx
 from deflect_common.schemas import Hit, SearchRequest
 
 RETRIEVAL_URL = os.environ.get("RETRIEVAL_URL", "http://localhost:8001")
-DATASET = Path(__file__).parents[3] / "evals" / "golden.yaml"
+DATASET = Path(os.environ.get("DATASET_PATH", Path(__file__).parents[3] / "evals" / "golden.yaml"))
 
 
 async def search(client: httpx.AsyncClient, query: str, **overrides) -> list[Hit]:

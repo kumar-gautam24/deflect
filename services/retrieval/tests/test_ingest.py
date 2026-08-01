@@ -7,15 +7,22 @@ from retrieval.ingest.pipeline import ingest_directory
 from retrieval.models import Chunk, Document
 
 
-def test_embeddings_have_configured_dimension_and_are_normalized():
+def test_embeddings_have_the_configured_dimension():
     vectors = embed_texts(["dependency injection", "path parameters"])
 
     assert len(vectors) == 2
     assert all(len(v) == 384 for v in vectors)
 
 
-def test_query_embedding_matches_document_embedding_dimension():
-    assert len(embed_query("how do I use Depends")) == len(embed_texts(["Depends"])[0])
+def test_query_embedding_applies_the_asymmetric_prefix():
+    """bge models are trained with a query prefix; dropping it degrades retrieval.
+
+    Comparing lengths would not detect its loss, so this compares the query vector
+    against the same text embedded as a document.
+    """
+    text = "how do I use Depends"
+
+    assert embed_query(text) != embed_texts([text])[0]
 
 
 async def test_ingest_persists_documents_and_chunks(session, tmp_path: Path):

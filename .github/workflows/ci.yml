@@ -52,8 +52,8 @@ jobs:
       - run: uv run pytest -q
 
   contracts:
-    # The wire schemas are the coupling point between services. If they stop
-    # importing cleanly, every service is broken at once.
+    # The wire schemas and the gate are the coupling point between services. A change
+    # here breaks every service at once, so it gets a real suite of its own.
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -61,8 +61,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv run --with pydantic --with google-genai --with httpx python -c "import sys; sys.path.insert(0, 'src'); import deflect_common.schemas as s; print(sorted(n for n in dir(s) if n[0].isupper()))"
-      - run: uv run --with ruff ruff check .
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run pytest -q
 
   web:
     runs-on: ubuntu-latest
@@ -111,8 +114,20 @@ jobs:
             -H 'Content-Type: application/json' \
             -d "{\"root\": \"/corpus\", \"commit_sha\": \"$(git -C /tmp/fastapi-src rev-parse HEAD)\"}"
 
+      # The golden dataset names real document paths. This check needs the retrieval
+      # service, so it runs here rather than in the isolated per-service job.
+      # REQUIRE_CORPUS_CHECK turns an unreachable service into a failure instead of a
+      # skip, so the check cannot quietly disappear.
+      - name: Validate the golden dataset against the ingested corpus
+        run: |
+          docker compose exec -T \
+            -e RETRIEVAL_URL=http://retrieval:8001 \
+            -e REQUIRE_CORPUS_CHECK=1 \
+            evals pytest tests/test_dataset.py -q
+
       # Fails the build when faithfulness regresses. This is the gate: a prompt
-      # change that makes answers less grounded cannot merge.
+      # change that makes answers less grounded cannot merge. The smoke subset is
+      # stratified so a limited run still exercises refusal.
       - name: Eval smoke set
         run: |
           curl -sf -X POST http://localhost:8003/runs \

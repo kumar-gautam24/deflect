@@ -78,3 +78,6 @@ class AnswerResponse(BaseModel):
 class RunEvalsRequest(BaseModel):
     limit: int | None = None
     fail_under: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Sweeps a retrieval variant through the answer service end to end. The query is
+    # replaced per item; the rest is what the run is measuring.
+    search: SearchRequest | None = None

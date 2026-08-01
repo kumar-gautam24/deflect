@@ -44,6 +44,9 @@ already orders the top 20 well, and reranking reshuffles them and keeps 5, so an
 correct document the cross-encoder ranks sixth or lower is pushed out of the window.
 Three stronger cross-encoders were tried; none beat plain hybrid on MRR:
 
+Produced by setting `RERANK_MODEL` and re-running the ablation, rather than by a
+script of its own:
+
 | reranker | hit@5 | MRR |
 | --- | --- | --- |
 | none (hybrid) | 0.892 | **0.762** |
@@ -151,9 +154,11 @@ obscure the parts worth understanding.
 ## Evals
 
 `evals/golden.yaml` holds 80 items: 65 answerable, and 15 that no document in the
-corpus answers, which must be refused. A test verifies every `expected_sources` path
-against the ingested corpus, because a typo there would look like a permanent
-retrieval regression.
+corpus answers, which must be refused. A test validates every `expected_sources` path
+against the retrieval service's `/documents` endpoint, because a typo there would look
+like a permanent retrieval regression rather than a bad label. It skips when that
+service is unreachable so the unit suite stays runnable alone; CI sets
+`REQUIRE_CORPUS_CHECK` so an unreachable service fails the build instead.
 
 Metrics are split into two families:
 
@@ -166,12 +171,15 @@ immediately whether retrieval or generation broke. Runs are stored with their co
 prompt version, model and retrieval config, and the dashboard diffs any two.
 
 CI runs a 10-item smoke set on every pull request and fails the build when
-faithfulness drops. The full dataset runs nightly.
+faithfulness drops. The subset is stratified rather than the first ten items, because
+the unanswerable questions sit at the end of the file and a head-of-list slice would
+never exercise refusal. The full dataset runs nightly.
 
 ## Running it
 
 ```bash
 docker compose up -d --build      # postgres plus all three services
+# Host ports are overridable if one is taken: RETRIEVAL_PORT=9001 docker compose up
 
 # Migrate each service, then ingest the corpus through the retrieval service.
 for s in retrieval answer evals; do docker compose exec -T $s alembic upgrade head; done
@@ -213,10 +221,11 @@ produced without one.
 
 ```bash
 for s in retrieval answer evals; do (cd services/$s && uv run pytest -q); done
+(cd packages/common && uv run pytest -q)
 cd apps/web && npm test
 ```
 
-73 service tests and 8 component tests. Each service's suite runs against its own test
+83 service tests, 12 for the shared contracts, and 8 component tests. Each service's suite runs against its own test
 database and needs nothing else: the answer service's tests use a fake retrieval, and
 the eval service's tests use a fake answer service, so neither needs a vector database,
 an embedding model or a provider key. That isolation is a direct benefit of the split.

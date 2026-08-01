@@ -50,3 +50,4 @@ async def test_lexical_search_returns_empty_for_absent_tokens(session, corpus):
 
 async def test_both_searches_respect_the_limit(session, corpus):
     assert len(await dense_search(session, "fastapi", limit=2)) == 2
+    assert len(await lexical_search(session, "code", limit=1)) <= 1

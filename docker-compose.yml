@@ -1,3 +1,6 @@
+# Host ports are overridable so a port already taken on the host does not block
+# the stack: RETRIEVAL_PORT=9001 docker compose up. Service-to-service URLs use
+# container names and internal ports, so they are unaffected.
 services:
   db:
     image: pgvector/pgvector:pg16
@@ -5,7 +8,7 @@ services:
       POSTGRES_USER: deflect
       POSTGRES_PASSWORD: deflect
       POSTGRES_DB: deflect
-    ports: ["5432:5432"]
+    ports: ["${DB_PORT:-5432}:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U deflect"]
       interval: 5s
@@ -20,7 +23,7 @@ services:
       dockerfile: services/retrieval/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_retrieval
-    ports: ["8001:8001"]
+    ports: ["${RETRIEVAL_PORT:-8001}:8001"]
     depends_on:
       db:
         condition: service_healthy
@@ -33,8 +36,9 @@ services:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_answer
       RETRIEVAL_URL: http://retrieval:8001
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
-    ports: ["8002:8002"]
+    ports: ["${ANSWER_PORT:-8002}:8002"]
     depends_on:
       db:
         condition: service_healthy
@@ -49,7 +53,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_evals
       ANSWER_URL: http://answer:8002
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-    ports: ["8003:8003"]
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      DATASET_PATH: /app/evals/golden.yaml
+      GIT_SHA: ${GIT_SHA:-unknown}
+    ports: ["${EVALS_PORT:-8003}:8003"]
     depends_on:
       db:
         condition: service_healthy

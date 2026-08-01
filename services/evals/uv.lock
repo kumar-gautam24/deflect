@@ -336,6 +336,13 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.6" },
 ]
 
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+
 [[package]]
 name = "deflect-evals"
 version = "0.1.0"

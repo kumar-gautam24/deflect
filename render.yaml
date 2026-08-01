@@ -24,11 +24,11 @@ services:
         sync: false
       - key: WEB_ORIGIN
         sync: false
+      # hostport yields host:port with no scheme. httpx rejects that as
+      # UnsupportedProtocol, which the client would report as a transient outage
+      # rather than the permanent misconfiguration it is.
       - key: RETRIEVAL_URL
-        fromService:
-          name: deflect-retrieval
-          type: web
-          property: hostport
+        sync: false
 
   - type: web
     name: deflect-evals
@@ -42,7 +42,4 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: ANSWER_URL
-        fromService:
-          name: deflect-answer
-          type: web
-          property: hostport
+        sync: false

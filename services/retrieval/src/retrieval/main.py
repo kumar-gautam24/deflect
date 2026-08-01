@@ -7,10 +7,11 @@ from deflect_common.schemas import (
     SearchResponse,
 )
 from fastapi import FastAPI
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from retrieval.db import SessionDep
 from retrieval.ingest.pipeline import ingest_directory
+from retrieval.models import Document
 from retrieval.pipeline import RetrievalConfig, retrieve
 
 app = FastAPI(title="Deflect retrieval")
@@ -20,6 +21,18 @@ app = FastAPI(title="Deflect retrieval")
 async def health(session: SessionDep) -> dict[str, str]:
     await session.execute(text("select 1"))
     return {"status": "ok", "database": "connected"}
+
+
+@app.get("/documents")
+async def documents(session: SessionDep) -> dict[str, list[str]]:
+    """Every ingested source path.
+
+    Exposed so the eval service can check that the golden dataset names documents
+    that actually exist. A typo there would otherwise look like a permanent
+    retrieval regression rather than a bad label.
+    """
+    paths = (await session.execute(select(Document.source_path))).scalars().all()
+    return {"source_paths": sorted(paths)}
 
 
 @app.post("/search")

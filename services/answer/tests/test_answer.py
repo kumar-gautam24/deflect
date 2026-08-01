@@ -86,7 +86,7 @@ async def test_answering_writes_a_trace_and_an_escalation_row(
 
     trace = (await session.execute(select(Trace))).scalars().one()
     escalation = (await session.execute(select(Escalation))).scalars().one()
-    assert trace.latency_ms >= 0
+    assert trace.model == "fake"
     assert escalation.trace_id == trace.id
 
 

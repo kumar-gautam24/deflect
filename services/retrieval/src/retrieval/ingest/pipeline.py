@@ -58,5 +58,11 @@ async def ingest_directory(session: AsyncSession, root: Path, commit_sha: str) -
         )
         total += len(chunks)
 
+        # Flush and release per document. Holding every chunk of the corpus in the
+        # identity map until the end grew the process past 5 GB and was OOM-killed in
+        # a container; flushing here keeps the working set to one document.
+        await session.flush()
+        session.expunge_all()
+
     await session.flush()
     return total

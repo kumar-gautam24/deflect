@@ -23,7 +23,7 @@ export default async function EvalsPage() {
 
       {runs.length === 0 ? (
         <p className="text-muted-foreground text-sm">
-          No runs yet. Run <code>scripts/run_evals.py</code> to record one.
+          No runs yet. Record one with <code>POST /runs</code> on the evals service.
         </p>
       ) : (
         <RunTable runs={runs} />

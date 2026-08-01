@@ -1,6 +1,5 @@
 import subprocess
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Annotated
 
 from deflect_common.llm.base import LLMClient, get_client
@@ -11,12 +10,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from evals.answer_client import AnswerClient
 from evals.config import get_settings
-from evals.dataset import load_dataset
+from evals.dataset import GoldenItem, load_dataset
 from evals.db import SessionDep
 from evals.models import EvalResult, EvalRun
 from evals.runner import run_evals
 
-DATASET = Path(__file__).parents[4] / "evals" / "golden.yaml"
+
+def _git_sha() -> str:
+    """Identify the code under evaluation.
+
+    Configured explicitly in a container, where there is neither a git binary nor a
+    checkout. Falls back to asking git during local runs.
+    """
+    configured = get_settings().git_sha
+    if configured:
+        return configured
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+
+
+def _smoke_subset(items: list[GoldenItem], limit: int | None) -> list[GoldenItem]:
+    """Take a limited run that still exercises refusal.
+
+    The unanswerable items sit at the end of the dataset, so a plain head-of-list
+    slice would score only answerable questions and never test the behaviour the
+    project exists for.
+    """
+    if limit is None or limit >= len(items):
+        return items
+
+    answerable = [i for i in items if not i.should_escalate]
+    unanswerable = [i for i in items if i.should_escalate]
+    refusals = max(1, limit // 4)
+    return unanswerable[:refusals] + answerable[: limit - refusals]
+
 
 def _make_judge() -> LLMClient:
     settings = get_settings()
@@ -107,10 +133,10 @@ async def create_run(
     judge: JudgeDep,
     answer: AnswerDep,
 ) -> dict:
-    items = load_dataset(DATASET)[: request.limit]
-    git_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    items = _smoke_subset(load_dataset(get_settings().dataset_path), request.limit)
+    git_sha = _git_sha()
 
-    run = await run_evals(session, items, answer, judge, None, git_sha)
+    run = await run_evals(session, items, answer, judge, request.search, git_sha)
     await session.commit()
 
     if request.fail_under is not None and run.metrics["faithfulness"] < request.fail_under:

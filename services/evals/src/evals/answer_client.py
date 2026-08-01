@@ -8,6 +8,7 @@ endpoint a real client calls, so the guarantee survives the network boundary.
 
 import httpx
 from deflect_common.schemas import AnswerRequest, AnswerResponse
+from fastapi import HTTPException
 
 
 class AnswerClient:
@@ -16,9 +17,17 @@ class AnswerClient:
         self._timeout = timeout
 
     async def answer(self, request: AnswerRequest) -> AnswerResponse:
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.post(
-                f"{self._base_url}/answer", json=request.model_dump()
-            )
-            response.raise_for_status()
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                response = await client.post(
+                    f"{self._base_url}/answer", json=request.model_dump()
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as cause:
+            # Matches RetrievalClient: a dependency being unreachable is reported as
+            # such rather than surfacing as an opaque 500 partway through a run.
+            raise HTTPException(
+                status_code=503, detail=f"answer service unavailable: {cause}"
+            ) from cause
+
         return AnswerResponse.model_validate(response.json())

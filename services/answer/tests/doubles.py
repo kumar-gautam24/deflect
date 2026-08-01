@@ -10,15 +10,12 @@ class FakeRetrieval:
     longer need a vector database or an embedding model, only the wire schema.
     """
 
-    def __init__(self, hits: list[Hit], error: Exception | None = None) -> None:
+    def __init__(self, hits: list[Hit]) -> None:
         self._hits = hits
-        self._error = error
         self.requests: list[SearchRequest] = []
 
     async def search(self, request: SearchRequest) -> SearchResponse:
         self.requests.append(request)
-        if self._error is not None:
-            raise self._error
         return SearchResponse(hits=self._hits)
 
 
