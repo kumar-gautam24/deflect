@@ -1,10 +1,11 @@
 import subprocess
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.schemas import RunEvalsRequest
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,11 +18,7 @@ from evals.runner import run_evals
 
 DATASET = Path(__file__).parents[4] / "evals" / "golden.yaml"
 
-app = FastAPI(title="Deflect evals")
-router = APIRouter()
-
-
-def build_judge() -> LLMClient:
+def _make_judge() -> LLMClient:
     settings = get_settings()
     return get_client(
         provider=settings.llm_provider,
@@ -29,6 +26,22 @@ def build_judge() -> LLMClient:
         api_key=settings.gemini_api_key,
         base_url=settings.ollama_base_url,
     )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Build the judge client once, at startup, so a missing credential stops the
+    service from booting rather than failing the first run that uses it."""
+    app.state.judge_client = _make_judge()
+    yield
+
+
+app = FastAPI(title="Deflect evals", lifespan=lifespan)
+router = APIRouter()
+
+
+def build_judge(request: Request) -> LLMClient:
+    return request.app.state.judge_client
 
 
 def build_answer_client() -> AnswerClient:

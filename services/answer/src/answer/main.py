@@ -1,11 +1,12 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.schemas import AnswerRequest, AnswerResponse
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
@@ -16,7 +17,30 @@ from answer.models import Trace
 from answer.retrieval_client import RetrievalClient
 from answer.service import answer_question
 
-app = FastAPI(title="Deflect answer")
+
+def _make_client() -> LLMClient:
+    settings = get_settings()
+    return get_client(
+        provider=settings.llm_provider,
+        model=settings.generation_model,
+        api_key=settings.gemini_api_key,
+        base_url=settings.ollama_base_url,
+    )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Build the provider client once, at startup.
+
+    Constructing it per request rebuilt an HTTP client on every call, and a missing
+    credential surfaced as a 500 on the first real request rather than a service that
+    refuses to boot. Failing here means a misconfigured deploy never takes traffic.
+    """
+    app.state.llm_client = _make_client()
+    yield
+
+
+app = FastAPI(title="Deflect answer", lifespan=lifespan)
 router = APIRouter()
 
 app.add_middleware(
@@ -27,14 +51,8 @@ app.add_middleware(
 )
 
 
-def build_client() -> LLMClient:
-    settings = get_settings()
-    return get_client(
-        provider=settings.llm_provider,
-        model=settings.generation_model,
-        api_key=settings.gemini_api_key,
-        base_url=settings.ollama_base_url,
-    )
+def build_client(request: Request) -> LLMClient:
+    return request.app.state.llm_client
 
 
 def build_retrieval() -> RetrievalClient:
