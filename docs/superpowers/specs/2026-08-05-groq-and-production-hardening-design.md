@@ -89,6 +89,37 @@ its configured provider rather than passing `gemini_api_key` unconditionally as 
 `LLM_PROVIDER` defaults to `groq`. `generation_model` and `judge_model` defaults change to the
 two `gpt-oss` models.
 
+### The free tier's real constraint is tokens per minute
+
+Measured from the API's own headers on 2026-08-05, identical for both models:
+
+| limit | value |
+| --- | --- |
+| `x-ratelimit-limit-tokens` | **8,000 per minute** |
+| `x-ratelimit-limit-requests` | 1,000 per day |
+
+An eval item costs roughly 5,400 tokens to answer (about 4,500 of retrieved context plus
+reasoning-inflated output) and a similar amount to judge — call it **11,000 tokens per item**.
+So the ceiling is about **1.4 minutes per item**, and the binding constraint is tokens, not
+requests: an 80-item run is 160 requests against a 1,000/day allowance, but roughly **110
+minutes** of wall clock.
+
+Two consequences the design has to absorb.
+
+**The eval runner must back off rather than fail.** A run that dies at item 47 on a 429 wastes
+45 minutes and leaves a partial `EvalRun` row. `GroqClient` retries on 429, honouring the
+`Retry-After` header, with a bounded number of attempts so a genuine outage still terminates.
+This is the one piece of new error handling in this sub-project.
+
+**The CI eval gate gets slower than a per-PR check should be.** Ten items is roughly 14
+minutes. The smoke gate therefore moves off pull requests and onto pushes to `main` plus the
+existing nightly schedule; pull requests keep the fast unit, contract and lint jobs. Blocking
+every PR for fourteen minutes on a free-tier quota trains people to ignore the gate, which is
+worse than running it less often on a branch that matters.
+
+This also converts sub-project B from a nice-to-have into something the system demonstrably
+needs: a 110-minute operation behind a synchronous HTTP request is not a design that works.
+
 ### Cost accounting
 
 `PRICING` in `telemetry.py` gains real Groq per-million rates for both models. Not zeroes: the
@@ -205,7 +236,8 @@ control would look like a model comparison while being nothing, which is worse t
 | --- | --- |
 | empty API key for the configured provider | raises at client construction; service does not boot |
 | model outside `SCHEMA_CAPABLE` | raises at client construction; service does not boot |
-| Groq returns a non-2xx | surfaces as it does today for Gemini — no new handling |
+| Groq returns 429 | retried with `Retry-After`, bounded attempts, then raised |
+| Groq returns another non-2xx | surfaces as it does today for Gemini — no new handling |
 | `/metrics` without a service credential | 401, matching every other guarded route |
 
 ## Testing
@@ -225,6 +257,9 @@ can run the whole suite.
   service's `/ready` still succeeds while retrieval is unreachable. That non-cascading property
   is easy to lose in a later refactor and cheap to pin now.
 - **`/metrics`** returns 401 without a credential.
+- **429 backoff**, against `MockTransport`: a 429 carrying `Retry-After` is retried and then
+  succeeds; repeated 429s stop at the attempt bound rather than looping forever. The clock is
+  injected so the test does not actually sleep.
 - **Gunicorn** is verified by a container smoke test, not a unit test: worker supervision is not
   observable in-process.
 
