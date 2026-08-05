@@ -1641,6 +1641,46 @@ export function isAuthorized(header: string | null, expected: string): boolean {
 Run: `cd apps/web && npx vitest run lib/basic-auth.test.ts`
 Expected: PASS — 8 passed.
 
+- [ ] **Step 4b: Write the client-address resolver**
+
+Create `apps/web/lib/client-ip.ts`. This decides the rate-limit key for the one endpoint
+that costs money, so getting it wrong disables the limiter silently.
+
+```ts
+// Extracted from the ask proxy so it can be unit-tested, and because getting this wrong
+// silently disables rate limiting on the one endpoint that costs money.
+//
+// Only the RIGHTMOST hop of X-Forwarded-For is trusted. The header is a list the visitor
+// can prepend to; the deployment platform either overwrites it or appends the real
+// address to its right, so the rightmost entry is the one the nearest trusted proxy
+// added and the leftmost is attacker-controlled either way.
+//
+// x-real-ip is deliberately NOT consulted. It is an nginx convention that neither Vercel
+// nor Render documents setting or stripping, so trusting it would mean trusting a header
+// nothing in this stack controls -- a visitor could simply send one.
+//
+// Behind no proxy at all (local development, or self-hosting without one) the only value
+// present is the visitor's own, and it is spoofable. That is inherent to running without
+// a trusted hop rather than something a header choice can fix; the daily cap is what
+// bounds cost in that deployment.
+export function clientAddress(headers: Headers): string | null {
+  const forwarded = headers.get("x-forwarded-for");
+  if (!forwarded) return null;
+
+  const hops = forwarded
+    .split(",")
+    .map((hop) => hop.trim())
+    .filter(Boolean);
+
+  return hops.length > 0 ? hops[hops.length - 1] : null;
+}
+```
+
+Test it in `apps/web/lib/client-ip.test.ts` covering: the rightmost hop is taken; a value
+the visitor prefixed is ignored; a single hop works; whitespace is stripped; a missing
+header and a separators-only header both yield `null`; and **an `x-real-ip` header is
+ignored even when present**, which is the regression test for the residual bypass.
+
 - [ ] **Step 5: Write the proxy**
 
 Create `apps/web/proxy.ts`. Next.js 16.2 renamed this file convention from
