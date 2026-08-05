@@ -131,7 +131,7 @@ jobs:
           docker compose exec -T \
             -e RETRIEVAL_URL=http://retrieval:8001 \
             -e REQUIRE_CORPUS_CHECK=1 \
-            -e SERVICE_TOKEN=ci-service-token \
+            -e CORPUS_CHECK_TOKEN=ci-service-token \
             evals pytest tests/test_dataset.py -q
 
       # Fails the build when faithfulness regresses. This is the gate: a prompt

@@ -91,9 +91,16 @@ async def test_every_expected_source_exists_in_the_ingested_corpus():
     crosses it.
     """
     url = os.environ.get("RETRIEVAL_URL", "http://localhost:8001")
+    # Deliberately not SERVICE_TOKEN: conftest.py assigns that before import, so a value
+    # passed in under that name never survives to here. This is the credential of the
+    # live retrieval service being checked against, which is a different thing from the
+    # token this service builds its own guards with.
+    token = os.environ.get("CORPUS_CHECK_TOKEN", "")
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.get(f"{url}/documents")
+            response = await client.get(
+                f"{url}/documents", headers={"Authorization": f"Bearer {token}"}
+            )
             response.raise_for_status()
     except httpx.HTTPError as cause:
         # Skipping keeps the unit suite runnable without the whole stack, but a
