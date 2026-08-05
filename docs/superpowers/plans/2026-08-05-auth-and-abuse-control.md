@@ -1986,9 +1986,15 @@ Expected: three `{"status": "ok", ...}` lines, then `401 401 401`, then `200`, t
 - [ ] **Step 8: Confirm a missing token stops the service**
 
 ```bash
-SERVICE_TOKEN= docker compose up retrieval 2>&1 | tail -5
+docker compose run --rm -e SERVICE_TOKEN= retrieval 2>&1 | tail -3
 ```
 Expected: `ValueError: the service token is empty; refusing to build an open guard`, and the container exits rather than serving.
+
+`SERVICE_TOKEN= docker compose up retrieval` does **not** reproduce this, and it is worth
+knowing why. Compose's `${SERVICE_TOKEN:-dev-service-token}` uses `:-`, which substitutes
+the default when the variable is empty *or* unset, so an empty value silently becomes the
+development token. `docker compose run -e` sets the container's environment directly,
+bypassing interpolation, which is what actually exercises the guard.
 
 - [ ] **Step 9: Commit**
 
