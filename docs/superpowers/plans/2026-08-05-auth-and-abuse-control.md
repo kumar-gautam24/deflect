@@ -33,7 +33,7 @@
 | `services/answer/tests/test_ratelimit.py` | Window expiry, address trust, daily boundary. |
 | `apps/web/lib/basic-auth.ts` | `isAuthorized(header, expected)` — extracted so it is unit-testable outside the edge runtime. |
 | `apps/web/lib/basic-auth.test.ts` | Credential comparison cases. |
-| `apps/web/middleware.ts` | Applies `isAuthorized` to `/traces`. |
+| `apps/web/proxy.ts` | Applies `isAuthorized` to `/traces`. |
 
 **Modified**
 
@@ -1531,7 +1531,7 @@ budget in a day."
 ## Task 8: Carry the tokens from the web application
 
 **Files:**
-- Create: `apps/web/lib/basic-auth.ts`, `apps/web/lib/basic-auth.test.ts`, `apps/web/middleware.ts`
+- Create: `apps/web/lib/basic-auth.ts`, `apps/web/lib/basic-auth.test.ts`, `apps/web/proxy.ts`
 - Modify: `apps/web/lib/api.ts`, `apps/web/app/api/ask/route.ts`
 
 **Interfaces:**
@@ -1595,7 +1595,7 @@ Expected: FAIL — cannot resolve `./basic-auth`
 Create `apps/web/lib/basic-auth.ts`:
 
 ```ts
-// Extracted from middleware.ts so it can be unit-tested outside the edge runtime.
+// Extracted from proxy.ts so it can be unit-tested outside the edge runtime.
 // The traces surface records every visitor's question and what it cost, so it is the
 // one page that must not be public on an open demo.
 
@@ -1641,9 +1641,10 @@ export function isAuthorized(header: string | null, expected: string): boolean {
 Run: `cd apps/web && npx vitest run lib/basic-auth.test.ts`
 Expected: PASS — 8 passed.
 
-- [ ] **Step 5: Write the middleware**
+- [ ] **Step 5: Write the proxy**
 
-Create `apps/web/middleware.ts`:
+Create `apps/web/proxy.ts`. Next.js 16.2 renamed this file convention from
+`middleware.ts`; the old name still works but warns on every build:
 
 ```ts
 import { NextResponse, type NextRequest } from "next/server";
@@ -1652,7 +1653,10 @@ import { isAuthorized } from "@/lib/basic-auth";
 // Basic auth rather than a sign-in page: the browser renders the credential prompt
 // itself, so there is no session store and no cookie to get wrong. A login flow for a
 // single operator is machinery maintained forever to avoid one browser prompt.
-export function middleware(request: NextRequest) {
+//
+// Named proxy.ts, not middleware.ts: Next.js 16.2 deprecated the older convention and
+// warns on every build, which is noise a public repository does not need.
+export function proxy(request: NextRequest) {
   if (isAuthorized(request.headers.get("authorization"), process.env.OPERATOR_TOKEN ?? "")) {
     return NextResponse.next();
   }
@@ -1737,12 +1741,12 @@ Run:
 cd apps/web
 npm test && npm run lint && npm run build
 ```
-Expected: 16 tests passed (8 existing plus 8 new). Lint clean. Build succeeds and lists `ƒ Middleware` in the route output.
+Expected: 16 tests passed (8 existing plus 8 new). Lint clean. Build succeeds and lists `ƒ Proxy` in the route output, with no deprecation warning.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add apps/web/lib/basic-auth.ts apps/web/lib/basic-auth.test.ts apps/web/middleware.ts \
+git add apps/web/lib/basic-auth.ts apps/web/lib/basic-auth.test.ts apps/web/proxy.ts \
         apps/web/lib/api.ts apps/web/app/api/ask/route.ts
 git commit -m "gate the traces page and forward the real client address
 
