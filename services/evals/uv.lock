@@ -322,6 +322,7 @@ name = "deflect-common"
 version = "0.1.0"
 source = { editable = "../../packages/common" }
 dependencies = [
+    { name = "fastapi" },
     { name = "google-genai" },
     { name = "httpx" },
     { name = "pydantic" },
@@ -330,6 +331,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi", specifier = ">=0.115" },
     { name = "google-genai", specifier = ">=0.3" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "pydantic", specifier = ">=2.9" },
