@@ -13,6 +13,8 @@ jobs:
       - run: docker compose up -d --build
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SERVICE_TOKEN: ci-service-token
+          OPERATOR_TOKEN: ci-operator-token
 
       - name: Wait for every service to report healthy
         run: |
@@ -30,14 +32,16 @@ jobs:
           docker compose exec -T answer alembic upgrade head
           docker compose exec -T evals alembic upgrade head
           docker compose cp /tmp/fastapi-src/docs/en/docs retrieval:/corpus
-          curl -sf -X POST http://localhost:8001/ingest \
+          curl -fsS -X POST localhost:8001/ingest \
             -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer ci-operator-token" \
             -d "{\"root\": \"/corpus\", \"commit_sha\": \"$(git -C /tmp/fastapi-src rev-parse HEAD)\"}"
 
       - name: Full golden dataset
         run: |
           curl -sf -X POST http://localhost:8003/runs \
             -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer ci-operator-token" \
             -d '{"fail_under": 0.85}'
 
       - name: Service logs on failure

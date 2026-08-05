@@ -10,6 +10,14 @@ services:
     envVars:
       - key: DATABASE_URL
         sync: false
+      # Both services on a call must carry the same SERVICE_TOKEN, so these are set
+      # by hand rather than with generateValue, which would mint a different one each.
+      - key: SERVICE_TOKEN
+        sync: false
+      - key: OPERATOR_TOKEN
+        sync: false
+      - key: CORPUS_ROOT
+        sync: false
 
   - type: web
     name: deflect-answer
@@ -29,6 +37,12 @@ services:
       # rather than the permanent misconfiguration it is.
       - key: RETRIEVAL_URL
         sync: false
+      # Both services on a call must carry the same SERVICE_TOKEN, so these are set
+      # by hand rather than with generateValue, which would mint a different one each.
+      - key: SERVICE_TOKEN
+        sync: false
+      - key: OPERATOR_TOKEN
+        sync: false
 
   - type: web
     name: deflect-evals
@@ -42,4 +56,10 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: ANSWER_URL
+        sync: false
+      # Both services on a call must carry the same SERVICE_TOKEN, so these are set
+      # by hand rather than with generateValue, which would mint a different one each.
+      - key: SERVICE_TOKEN
+        sync: false
+      - key: OPERATOR_TOKEN
         sync: false

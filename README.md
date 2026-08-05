@@ -151,6 +151,38 @@ point: a breaking change there is a coordinated deploy.
 distributed tracing backend. Adding infrastructure the system has no use for would
 obscure the parts worth understanding.
 
+## Security
+
+| service | route | principal |
+| --- | --- | --- |
+| retrieval | `GET /health` | public |
+| retrieval | `GET /documents` | service |
+| retrieval | `POST /search` | service |
+| retrieval | `POST /ingest` | operator, plus path confinement |
+| answer | `GET /health` | public |
+| answer | `POST /ask` | public, rate limited |
+| answer | `POST /answer` | service |
+| answer | `GET /traces`, `GET /traces/{id}` | operator |
+| evals | `GET /health` | public |
+| evals | `POST /runs` | operator |
+| evals | `GET /eval-runs`, `/eval-runs/diff`, `/eval-runs/{id}` | public |
+
+Two static bearer tokens carried in the environment, enforced by one dependency in
+`packages/common`. An API-key table with per-caller revocation would have needed either a
+shared table or one duplicated into all three databases, trading the invariant the split
+exists to demonstrate for machinery a single-operator deployment will not use.
+
+Every service refuses to start with either token unset, so a misconfigured deploy never
+takes traffic. `/ingest` additionally resolves its requested root and rejects anything
+outside `CORPUS_ROOT`: a leaked operator token should not become a filesystem read
+primitive.
+
+`/ask` is open, because the demo is. A per-address sliding window stops one script, and a
+daily cap counted from `traces` bounds the provider bill. Only the second of those is a
+spend bound -- a botnet has many real addresses -- and the two are sized together: 20 an
+hour over 24 hours is 480, just under the 500 daily ceiling, so no single address can
+exhaust a day's budget.
+
 ## Evals
 
 `evals/golden.yaml` holds 80 items: 65 answerable, and 15 that no document in the
@@ -187,6 +219,7 @@ for s in retrieval answer evals; do docker compose exec -T $s alembic upgrade he
 git clone --depth 1 https://github.com/fastapi/fastapi /tmp/fastapi-src
 docker compose cp /tmp/fastapi-src/docs/en/docs retrieval:/corpus
 curl -X POST localhost:8001/ingest -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer ${OPERATOR_TOKEN:-dev-operator-token}" \
   -d "{\"root\": \"/corpus\", \"commit_sha\": \"$(git -C /tmp/fastapi-src rev-parse HEAD)\"}"
 ```
 
@@ -205,9 +238,11 @@ npm run dev
    one only, then apply each service's migrations against its own `DATABASE_URL`.
 2. **Render** — deploy from `render.yaml`. It wires `RETRIEVAL_URL` and `ANSWER_URL`
    between services; set each `DATABASE_URL` (Neon pooled string, with the
-   `postgresql+asyncpg://` prefix), `GEMINI_API_KEY`, and `WEB_ORIGIN`.
+   `postgresql+asyncpg://` prefix), `GEMINI_API_KEY`, `WEB_ORIGIN`, `SERVICE_TOKEN`, and
+   `OPERATOR_TOKEN`. The same `SERVICE_TOKEN` must be given to all three services, since
+   each one both presents it and checks it on incoming calls.
 3. **Vercel** — deploy `apps/web` with `ANSWER_URL` and `EVALS_URL` set to the
-   corresponding Render URLs.
+   corresponding Render URLs, plus `OPERATOR_TOKEN` and `SERVICE_TOKEN`.
 
 `WEB_ORIGIN` is what the answer service's CORS allowlist reads, so the deployed
 frontend must be named there or browser requests are rejected.
@@ -225,7 +260,8 @@ for s in retrieval answer evals; do (cd services/$s && uv run pytest -q); done
 cd apps/web && npm test
 ```
 
-83 service tests, 12 for the shared contracts, and 8 component tests. Each service's suite runs against its own test
+132 service tests (45 retrieval, 43 answer, 44 evals), 24 for the shared contracts, and
+24 component tests. Each service's suite runs against its own test
 database and needs nothing else: the answer service's tests use a fake retrieval, and
 the eval service's tests use a fake answer service, so neither needs a vector database,
 an embedding model or a provider key. That isolation is a direct benefit of the split.

@@ -25,6 +25,8 @@ jobs:
     env:
       PGPASSWORD: deflect
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_${{ matrix.service }}
+      SERVICE_TOKEN: ci-service-token
+      OPERATOR_TOKEN: ci-operator-token
     defaults:
       run:
         working-directory: services/${{ matrix.service }}
@@ -55,6 +57,9 @@ jobs:
     # The wire schemas and the gate are the coupling point between services. A change
     # here breaks every service at once, so it gets a real suite of its own.
     runs-on: ubuntu-latest
+    env:
+      SERVICE_TOKEN: ci-service-token
+      OPERATOR_TOKEN: ci-operator-token
     defaults:
       run:
         working-directory: packages/common
@@ -93,6 +98,8 @@ jobs:
         run: docker compose up -d --build
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SERVICE_TOKEN: ci-service-token
+          OPERATOR_TOKEN: ci-operator-token
 
       - name: Wait for every service to report healthy
         run: |
@@ -110,8 +117,9 @@ jobs:
           docker compose exec -T answer alembic upgrade head
           docker compose exec -T evals alembic upgrade head
           docker compose cp /tmp/fastapi-src/docs/en/docs retrieval:/corpus
-          curl -sf -X POST http://localhost:8001/ingest \
+          curl -fsS -X POST localhost:8001/ingest \
             -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer ci-operator-token" \
             -d "{\"root\": \"/corpus\", \"commit_sha\": \"$(git -C /tmp/fastapi-src rev-parse HEAD)\"}"
 
       # The golden dataset names real document paths. This check needs the retrieval
@@ -123,6 +131,7 @@ jobs:
           docker compose exec -T \
             -e RETRIEVAL_URL=http://retrieval:8001 \
             -e REQUIRE_CORPUS_CHECK=1 \
+            -e SERVICE_TOKEN=ci-service-token \
             evals pytest tests/test_dataset.py -q
 
       # Fails the build when faithfulness regresses. This is the gate: a prompt
@@ -132,6 +141,7 @@ jobs:
         run: |
           curl -sf -X POST http://localhost:8003/runs \
             -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer ci-operator-token" \
             -d '{"limit": 10, "fail_under": 0.85}'
 
       - name: Service logs on failure

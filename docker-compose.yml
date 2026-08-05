@@ -2,6 +2,8 @@
 # the stack: RETRIEVAL_PORT=9001 docker compose up. Service-to-service URLs use
 # container names and internal ports, so they are unaffected.
 services:
+  # The token defaults are development values and exist so the stack starts with no .env.
+  # Render supplies real ones per service; nothing here is a production credential.
   db:
     image: pgvector/pgvector:pg16
     environment:
@@ -23,6 +25,9 @@ services:
       dockerfile: services/retrieval/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_retrieval
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
+      CORPUS_ROOT: /corpus
     ports: ["${RETRIEVAL_PORT:-8001}:8001"]
     depends_on:
       db:
@@ -38,6 +43,8 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
     ports: ["${ANSWER_PORT:-8002}:8002"]
     depends_on:
       db:
@@ -56,6 +63,8 @@ services:
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
       DATASET_PATH: /app/evals/golden.yaml
       GIT_SHA: ${GIT_SHA:-unknown}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
     ports: ["${EVALS_PORT:-8003}:8003"]
     depends_on:
       db:
