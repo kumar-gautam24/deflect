@@ -30,10 +30,13 @@ def get_client(
     base_url: str = "http://localhost:11434",
 ) -> LLMClient:
     from deflect_common.llm.gemini import GeminiClient
+    from deflect_common.llm.groq import GroqClient
     from deflect_common.llm.ollama import OllamaClient
 
     if provider == "gemini":
         return GeminiClient(model, api_key)
+    if provider == "groq":
+        return GroqClient(model, api_key)
     if provider == "ollama":
         return OllamaClient(model, base_url)
     raise ValueError(f"unknown provider: {provider}")
