@@ -70,6 +70,12 @@ router = APIRouter()
 # expensive operation in the system reachable by anyone.
 require_operator = bearer_guard(get_settings().operator_token, "operator")
 
+# Built but never attached to a route: no evals route has the service principal. It
+# exists so an unset SERVICE_TOKEN aborts this import, the same as it does in the other
+# two services. This service presents that token outbound to the answer service, and a
+# deploy that forgot it should refuse to start rather than fail partway through a run.
+_require_service_at_startup = bearer_guard(get_settings().service_token, "service")
+
 
 def build_judge(request: Request) -> LLMClient:
     return request.app.state.judge_client

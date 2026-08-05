@@ -16,6 +16,16 @@ export async function POST(request: Request) {
   // thing the limiter exists to prevent.
   const address = clientAddress(request.headers);
 
+  // An unset token is not a broken question -- it is a deployment that will silently
+  // rate limit every visitor as one caller, because the answer service will not trust
+  // the address this proxy forwards. Failing here makes that a visible 500 in the
+  // deploy's first minute rather than a throttle nobody diagnoses.
+  if (!SERVICE_TOKEN) {
+    return new Response("ask proxy is not configured: SERVICE_TOKEN is unset", {
+      status: 500,
+    });
+  }
+
   const upstream = await fetch(`${ANSWER_URL}/ask`, {
     method: "POST",
     headers: {
