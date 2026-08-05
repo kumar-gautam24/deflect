@@ -74,6 +74,14 @@ Copied from the spec so no task has to leave this document. **A route absent fro
 - Create: `packages/common/src/deflect_common/auth.py`
 - Test: `packages/common/tests/test_auth.py`
 
+**Dependency:** `packages/common` does not currently depend on `fastapi`, and `auth.py`
+imports `Header` and `HTTPException` from it. Add `"fastapi>=0.115"` to the `dependencies`
+list in `packages/common/pyproject.toml` — the same floor all three services already pin —
+then `uv lock` in `packages/common` **and in all three services**. Each service resolves
+`deflect-common` through its own independent lockfile, so changing common's dependencies
+invalidates all three; CI runs a plain `uv sync`, which relocks silently rather than
+failing, so a stale lockfile stops describing what CI installs without anything going red.
+
 **Interfaces:**
 - Consumes: nothing.
 - Produces:
