@@ -642,7 +642,11 @@ OPERATOR = {"Authorization": "Bearer test-operator-token"}
 
 
 async def request(method: str, path: str, headers: dict | None = None):
-    transport = ASGITransport(app=app)
+    # raise_app_exceptions=False because these tests assert what the *guard* layer does.
+    # ASGITransport does not run the app's lifespan, so any route that reaches its
+    # handler finds app.state.llm_client unset; that is a 500 we do not care about here,
+    # and letting it propagate would mask the status code under test.
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.request(method, path, headers=headers or {}, json={})
 
@@ -769,7 +773,27 @@ def build_retrieval() -> RetrievalClient:
     return RetrievalClient(settings.retrieval_url, settings.service_token)
 ```
 
-- [ ] **Step 7: Run the whole answer suite**
+- [ ] **Step 7: Credential the existing tests that call /answer**
+
+`services/answer/tests/test_answer.py` posts to `/answer` seven times through one shared
+helper. That route now requires a credential, so every one of those returns 401 until the
+helper sends it. Change the helper — not the seven call sites:
+
+```python
+async def post(app, path: str, body: dict):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # /answer is service-only. Sending the credential here rather than overriding the
+        # guard keeps these tests exercising the real dependency chain, so a guard that
+        # stopped working would still fail them.
+        return await client.post(
+            path, json=body, headers={"Authorization": "Bearer test-service-token"}
+        )
+```
+
+Also update any `RetrievalClient(` construction site in this file to pass a token.
+
+- [ ] **Step 8: Run the whole answer suite**
 
 Run:
 ```bash
@@ -782,7 +806,7 @@ Expected: PASS — 27 passed (20 existing plus 7 new). Ruff clean.
 
 If any existing test constructs `RetrievalClient` positionally with one argument, add the token argument there.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add services/answer/src/answer/config.py services/answer/src/answer/main.py \
@@ -973,7 +997,7 @@ Expected: PASS — 44 passed (38 existing plus 6 new). Ruff clean.
 
 If any existing test constructs `AnswerClient` with one positional argument, add the token.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add services/evals/src/evals/config.py services/evals/src/evals/main.py \
@@ -1715,7 +1739,7 @@ npm test && npm run lint && npm run build
 ```
 Expected: 16 tests passed (8 existing plus 8 new). Lint clean. Build succeeds and lists `ƒ Middleware` in the route output.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add apps/web/lib/basic-auth.ts apps/web/lib/basic-auth.test.ts apps/web/middleware.ts \
