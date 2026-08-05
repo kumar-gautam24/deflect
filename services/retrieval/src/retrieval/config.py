@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_retrieval"
     )
+    # Empty by default so a deployment that forgets them fails at import rather than
+    # serving open routes. docker-compose supplies development values.
+    service_token: str = ""
+    operator_token: str = ""
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384
     # Bounds peak memory during ingest. One document in the corpus chunks into 1,066

@@ -1,7 +1,14 @@
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession
+import os
 
-from retrieval.db import engine
+# Set before importing anything under retrieval.*: config is read at module import, and
+# bearer_guard refuses to build on an empty token, so main.py would fail to import.
+os.environ.setdefault("SERVICE_TOKEN", "test-service-token")
+os.environ.setdefault("OPERATOR_TOKEN", "test-operator-token")
+
+import pytest_asyncio  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
+
+from retrieval.db import engine  # noqa: E402
 
 
 @pytest_asyncio.fixture
