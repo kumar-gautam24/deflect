@@ -1,13 +1,15 @@
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Annotated
 
-from deflect_common.auth import bearer_guard
+from deflect_common.auth import bearer_guard, token_matches
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.schemas import AnswerRequest, AnswerResponse
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
@@ -15,6 +17,12 @@ from sqlalchemy import select, text
 from answer.config import get_settings
 from answer.db import SessionDep
 from answer.models import Trace
+from answer.ratelimit import (
+    SlidingWindowLimiter,
+    client_address,
+    questions_today,
+    seconds_until_utc_midnight,
+)
 from answer.retrieval_client import RetrievalClient
 from answer.service import answer_question
 
@@ -48,6 +56,43 @@ router = APIRouter()
 # exits before binding a port. Module-level names are what dependency_overrides keys on.
 require_service = bearer_guard(get_settings().service_token, "service")
 require_operator = bearer_guard(get_settings().operator_token, "operator")
+
+# One limiter for the process. Per-process state means each instance counts separately
+# and a redeploy grants a fresh allowance; see ratelimit.py for why that is accepted.
+_ask_limiter = SlidingWindowLimiter(
+    limit=get_settings().ask_rate_limit_per_hour, window_seconds=3600
+)
+
+
+async def enforce_ask_limits(
+    http: Request,
+    session: SessionDep,
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    """Reject an abusive question before it reaches a model.
+
+    Ordered cheapest first: the per-address window is a dict lookup, the daily cap is a
+    database query.
+    """
+    settings = get_settings()
+    trusted = token_matches(settings.service_token, authorization)
+    address = client_address(http, trust_forwarded=trusted)
+
+    if not _ask_limiter.check(address, time.monotonic()):
+        raise HTTPException(
+            status_code=429,
+            detail="too many questions from this address",
+            headers={"Retry-After": "3600"},
+        )
+
+    now = datetime.now(UTC)
+    if await questions_today(session, now) >= settings.ask_daily_limit:
+        raise HTTPException(
+            status_code=429,
+            detail="this demo's daily question budget is spent; it resets at UTC midnight",
+            headers={"Retry-After": str(seconds_until_utc_midnight(now))},
+        )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -110,7 +155,7 @@ async def answer(
     return result
 
 
-@router.post("/ask")
+@router.post("/ask", dependencies=[Depends(enforce_ask_limits)])
 async def ask(
     request: AnswerRequest,
     session: SessionDep,
