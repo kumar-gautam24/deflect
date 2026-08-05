@@ -12,7 +12,12 @@ from answer.telemetry import estimate_cost
 async def post(app, path: str, body: dict):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.post(path, json=body)
+        # /answer is service-only. Sending the credential here rather than overriding the
+        # guard keeps these tests exercising the real dependency chain, so a guard that
+        # stopped working would still fail them.
+        return await client.post(
+            path, json=body, headers={"Authorization": "Bearer test-service-token"}
+        )
 
 
 def test_cost_scales_with_token_counts():

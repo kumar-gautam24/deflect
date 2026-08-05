@@ -7,7 +7,11 @@ OPERATOR = {"Authorization": "Bearer test-operator-token"}
 
 
 async def request(method: str, path: str, headers: dict | None = None):
-    transport = ASGITransport(app=app)
+    # raise_app_exceptions=False because these tests assert what the *guard* layer does.
+    # ASGITransport does not run the app's lifespan, so any route that reaches its
+    # handler finds app.state.llm_client unset; that is a 500 we do not care about here,
+    # and letting it propagate would mask the status code under test.
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.request(method, path, headers=headers or {}, json={})
 
