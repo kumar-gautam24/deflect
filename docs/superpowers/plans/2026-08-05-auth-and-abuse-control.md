@@ -1958,7 +1958,9 @@ In `### Tests`, correct the counts to the measured totals: **129 service tests (
 - [ ] **Step 7: Verify the whole stack from cold**
 
 ```bash
-docker compose down -v
+# Deliberately NOT `down -v`: that destroys the pgdata volume holding the ingested
+# corpus (155 documents, 2,370 chunks), which costs an embedding-model run to rebuild.
+docker compose down
 docker compose up -d --build
 for s in retrieval answer evals; do docker compose exec -T $s alembic upgrade head; done
 
