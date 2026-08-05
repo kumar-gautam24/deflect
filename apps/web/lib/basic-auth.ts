@@ -1,4 +1,4 @@
-// Extracted from middleware.ts so it can be unit-tested outside the edge runtime.
+// Extracted from proxy.ts so it can be unit-tested outside the edge runtime.
 // The traces surface records every visitor's question and what it cost, so it is the
 // one page that must not be public on an open demo.
 

@@ -4,7 +4,10 @@ import { isAuthorized } from "@/lib/basic-auth";
 // Basic auth rather than a sign-in page: the browser renders the credential prompt
 // itself, so there is no session store and no cookie to get wrong. A login flow for a
 // single operator is machinery maintained forever to avoid one browser prompt.
-export function middleware(request: NextRequest) {
+//
+// Named proxy.ts, not middleware.ts: Next.js 16.2 deprecated the older convention and
+// warns on every build, which is noise a public repository does not need.
+export function proxy(request: NextRequest) {
   if (isAuthorized(request.headers.get("authorization"), process.env.OPERATOR_TOKEN ?? "")) {
     return NextResponse.next();
   }
