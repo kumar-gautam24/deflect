@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -13,6 +14,10 @@ class Settings(BaseSettings):
     # serving open routes. docker-compose supplies development values.
     service_token: str = ""
     operator_token: str = ""
+    # Ingest resolves its requested root against this and refuses anything outside it.
+    # An operator token that leaked would otherwise be a filesystem read primitive:
+    # /ingest reads a directory and /search hands the contents back.
+    corpus_root: Path = Path("/corpus")
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384
     # Bounds peak memory during ingest. One document in the corpus chunks into 1,066

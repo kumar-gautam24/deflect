@@ -7,7 +7,7 @@ from deflect_common.schemas import (
     SearchRequest,
     SearchResponse,
 )
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import select, text
 
 from retrieval.config import get_settings
@@ -56,8 +56,27 @@ async def search(request: SearchRequest, session: SessionDep) -> SearchResponse:
     return SearchResponse(hits=await retrieve(session, request.query, config))
 
 
+def resolve_corpus_path(root: str, corpus_root: Path) -> Path:
+    """Resolve a requested ingest root, refusing anything outside `corpus_root`.
+
+    Resolution happens before the check so a symlink pointing out of the corpus is
+    caught, not only a literal `..`. is_relative_to compares path components rather
+    than string prefixes, so a sibling named corpus-secrets does not pass as /corpus.
+    """
+    requested = Path(root).resolve()
+    allowed = corpus_root.resolve()
+
+    if requested != allowed and not requested.is_relative_to(allowed):
+        # The rejected path is deliberately absent from the message: echoing it back
+        # would turn this endpoint into a way to map the container filesystem.
+        raise HTTPException(status_code=400, detail="ingest root is outside the corpus root")
+
+    return requested
+
+
 @app.post("/ingest", dependencies=[Depends(require_operator)])
 async def ingest(request: IngestRequest, session: SessionDep) -> IngestResponse:
-    count = await ingest_directory(session, Path(request.root), request.commit_sha)
+    root = resolve_corpus_path(request.root, get_settings().corpus_root)
+    count = await ingest_directory(session, root, request.commit_sha)
     await session.commit()
     return IngestResponse(chunks=count)
