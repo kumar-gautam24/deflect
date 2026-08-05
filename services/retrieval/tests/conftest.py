@@ -2,8 +2,10 @@ import os
 
 # Set before importing anything under retrieval.*: config is read at module import, and
 # bearer_guard refuses to build on an empty token, so main.py would fail to import.
-os.environ.setdefault("SERVICE_TOKEN", "test-service-token")
-os.environ.setdefault("OPERATOR_TOKEN", "test-operator-token")
+# Assigned rather than setdefault: a developer with SERVICE_TOKEN already exported would
+# otherwise build guards from their shell's value while the tests send these constants.
+os.environ["SERVICE_TOKEN"] = "test-service-token"
+os.environ["OPERATOR_TOKEN"] = "test-operator-token"
 
 import pytest_asyncio  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
