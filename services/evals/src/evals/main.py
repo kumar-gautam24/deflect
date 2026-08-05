@@ -4,6 +4,8 @@ from typing import Annotated
 
 from deflect_common.auth import bearer_guard
 from deflect_common.llm.base import LLMClient, get_client
+from deflect_common.logging import configure_logging
+from deflect_common.observability import RequestIdMiddleware
 from deflect_common.schemas import RunEvalsRequest
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from sqlalchemy import select, text
@@ -64,6 +66,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Deflect evals", lifespan=lifespan)
+configure_logging()
+app.add_middleware(RequestIdMiddleware)
 router = APIRouter()
 
 # Built at import so an unset token aborts this module rather than leaving the most

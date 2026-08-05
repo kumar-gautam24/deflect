@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from deflect_common.auth import bearer_guard
+from deflect_common.logging import configure_logging
+from deflect_common.observability import RequestIdMiddleware
 from deflect_common.schemas import (
     IngestRequest,
     IngestResponse,
@@ -17,6 +19,8 @@ from retrieval.models import Document
 from retrieval.pipeline import RetrievalConfig, retrieve
 
 app = FastAPI(title="Deflect retrieval")
+configure_logging()
+app.add_middleware(RequestIdMiddleware)
 
 # Built at import, not in a lifespan: an unset token aborts this module and uvicorn
 # exits before binding a port. Module-level names are also what dependency_overrides

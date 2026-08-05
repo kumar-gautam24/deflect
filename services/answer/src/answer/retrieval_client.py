@@ -6,6 +6,8 @@ built on no context is exactly what the escalation gate exists to prevent.
 """
 
 import httpx
+from deflect_common.logging import request_id
+from deflect_common.observability import HEADER
 from deflect_common.schemas import SearchRequest, SearchResponse
 from fastapi import HTTPException
 
@@ -19,10 +21,15 @@ class RetrievalClient:
     async def search(self, request: SearchRequest) -> SearchResponse:
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
+                headers = {"Authorization": f"Bearer {self._token}"}
+                # Without this the id stops at the service boundary and the trace breaks
+                # exactly where a multi-service bug is hardest to follow.
+                if request_id.get():
+                    headers[HEADER] = request_id.get()
                 response = await client.post(
                     f"{self._base_url}/search",
                     json=request.model_dump(),
-                    headers={"Authorization": f"Bearer {self._token}"},
+                    headers=headers,
                 )
                 response.raise_for_status()
         except httpx.HTTPStatusError as cause:

@@ -8,6 +8,8 @@ from typing import Annotated
 
 from deflect_common.auth import bearer_guard, token_matches
 from deflect_common.llm.base import LLMClient, get_client
+from deflect_common.logging import configure_logging
+from deflect_common.observability import RequestIdMiddleware
 from deflect_common.schemas import AnswerRequest, AnswerResponse
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,6 +52,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Deflect answer", lifespan=lifespan)
+configure_logging()
+app.add_middleware(RequestIdMiddleware)
 router = APIRouter()
 
 # Built at import, not in the lifespan: an unset token aborts this module and uvicorn

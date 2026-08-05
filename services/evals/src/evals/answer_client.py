@@ -7,6 +7,8 @@ endpoint a real client calls, so the guarantee survives the network boundary.
 """
 
 import httpx
+from deflect_common.logging import request_id
+from deflect_common.observability import HEADER
 from deflect_common.schemas import AnswerRequest, AnswerResponse
 from fastapi import HTTPException
 
@@ -20,10 +22,15 @@ class AnswerClient:
     async def answer(self, request: AnswerRequest) -> AnswerResponse:
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
+                headers = {"Authorization": f"Bearer {self._token}"}
+                # Without this the id stops at the service boundary and the trace breaks
+                # exactly where a multi-service bug is hardest to follow.
+                if request_id.get():
+                    headers[HEADER] = request_id.get()
                 response = await client.post(
                     f"{self._base_url}/answer",
                     json=request.model_dump(),
-                    headers={"Authorization": f"Bearer {self._token}"},
+                    headers=headers,
                 )
                 response.raise_for_status()
         except httpx.HTTPStatusError as cause:
