@@ -23,9 +23,9 @@ RUN uv sync --no-dev --frozen
 # embedding model download dies with EACCES on the first /search -- a failure that no unit
 # test sees, because the tests never run inside the container.
 ENV HF_HOME=/app/.cache/huggingface
-RUN useradd --system --uid 10001 deflect \
+RUN useradd --system --uid 10001 --create-home --home-dir /home/deflect deflect \
     && mkdir -p /app/.cache/huggingface \
-    && chown -R deflect /app
+    && chown -R deflect /app /home/deflect
 USER deflect
 # Two workers because retrieval embeds and reranks in-process, which is CPU-bound and
 # blocks the event loop -- async concurrency alone does not help there. Gunicorn also

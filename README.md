@@ -194,14 +194,13 @@ service is unreachable so the unit suite stays runnable alone; CI sets
 
 ### Which model produced these numbers
 
-The generation metrics are produced with `openai/gpt-oss-20b` generating and
-`openai/gpt-oss-120b` judging, both on Groq's free tier. The judge is deliberately the
-stronger model: a judge no stronger than the generator rates its own phrasing highly, and
-the numbers stop meaning anything.
+**Generation metrics have not been published for this deployment yet.** When they are,
+they will use `openai/gpt-oss-20b` generating and `openai/gpt-oss-120b` judging, both on
+Groq's free tier. The judge is deliberately the stronger model: a judge no stronger than
+the generator rates its own phrasing highly, and the numbers stop meaning anything.
 
-An earlier set was produced with `gemini-2.0-flash` generating and `gemini-2.0-pro`
-judging. Those are kept in git history rather than shown here, because reproducing them
-needs a Gemini key this deployment does not have.
+The run is slow rather than expensive — Groq's free tier allows 8,000 tokens a minute, so
+the full 80-item dataset takes roughly 110 minutes.
 
 A side-by-side provider comparison was considered and rejected. Doing it honestly needs
 one judge scoring both generators; otherwise the generator and the judge both change and
@@ -220,8 +219,10 @@ The split is the point. When a run regresses, the deterministic metrics say
 immediately whether retrieval or generation broke. Runs are stored with their commit,
 prompt version, model and retrieval config, and the dashboard diffs any two.
 
-CI runs a 10-item smoke set on every pull request and fails the build when
-faithfulness drops. The subset is stratified rather than the first ten items, because
+CI runs a 10-item smoke set on pushes to `main` and fails the build when faithfulness
+drops. It is not run per pull request: fourteen minutes against a free-tier quota trains
+people to ignore a gate. The token-free checks in that job — ingest and the golden-dataset
+validation — still run on every pull request. The subset is stratified rather than the first ten items, because
 the unanswerable questions sit at the end of the file and a head-of-list slice would
 never exercise refusal. The full dataset runs nightly.
 
@@ -307,7 +308,7 @@ for s in retrieval answer evals; do (cd services/$s && uv run pytest -q); done
 cd apps/web && npm test
 ```
 
-158 service tests (49 retrieval, 58 answer, 51 evals), 40 for the shared contracts, and
+160 service tests (49 retrieval, 60 answer, 51 evals), 42 for the shared contracts, and
 24 component tests. Each service's suite runs against its own test
 database and needs nothing else: the answer service's tests use a fake retrieval, and
 the eval service's tests use a fake answer service, so neither needs a vector database,

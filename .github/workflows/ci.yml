@@ -90,11 +90,6 @@ jobs:
       - run: npm run build
 
   eval-smoke:
-    # Ten items is roughly fourteen minutes against Groq's free tier of 8,000 tokens a
-    # minute. Blocking every pull request for that long trains people to ignore the gate,
-    # which is worse than running it on main and nightly, where it still catches a
-    # faithfulness regression before it ships.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -139,10 +134,20 @@ jobs:
             -e CORPUS_CHECK_TOKEN=ci-service-token \
             evals pytest tests/test_dataset.py -q
 
+      # Ten items is roughly fourteen minutes against Groq's free tier of 8,000 tokens a
+      # minute. Blocking every pull request for that long trains people to ignore the
+      # gate, so only this step waits for main -- the steps above it spend no tokens and
+      # keep guarding every pull request, including the golden-dataset check that is the
+      # only thing catching a typo in expected_sources.
+      - name: Skip the token-spending gate on pull requests
+        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+        run: echo "eval gate runs on main pushes and nightly; see the comment above"
+
       # Fails the build when faithfulness regresses. This is the gate: a prompt
       # change that makes answers less grounded cannot merge. The smoke subset is
       # stratified so a limited run still exercises refusal.
       - name: Eval smoke set
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           curl -sf -X POST http://localhost:8003/runs \
             -H 'Content-Type: application/json' \

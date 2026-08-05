@@ -24,15 +24,51 @@ from answer.telemetry import estimate_cost
 PROMPT_VERSION = "answer_v1"
 PROMPT_TEMPLATE = (Path(__file__).parent / "prompts" / f"{PROMPT_VERSION}.md").read_text()
 
-RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "answer": {"type": "string"},
-        "cited_chunk_ids": {"type": "array", "items": {"type": "integer"}},
-        "grounded": {"type": "boolean"},
-    },
-    "required": ["answer", "cited_chunk_ids", "grounded"],
-}
+def response_schema(chunk_ids: list[int]) -> dict:
+    """The response shape, with citations constrained to the ids actually retrieved.
+
+    Ids are strings, not integers, and that is the whole point. Asked for an integer
+    array, gpt-oss concatenated the ids into a single number -- [4161, 2750, 4179] came
+    back as [4161275041794180] -- and every answer shipped with no citations, because the
+    resolver dropped the nonsense value. An enum of integers did not fix it either: the
+    provider validates the enum after generation rather than constraining generation to
+    it, so an invented number became a hard 400 instead. As strings the model copies a
+    literal token it can see in the context instead of composing a number.
+
+    The enum also makes citing a chunk that was never retrieved structurally impossible
+    rather than merely filtered afterwards.
+    """
+    cited = {"type": "array", "items": {"type": "string"}}
+    # An empty enum is not valid JSON Schema. With no hits the gate escalates anyway, so
+    # the unconstrained shape is only ever used for an answer that will be discarded.
+    if chunk_ids:
+        cited = {"type": "array", "items": {"type": "string", "enum": [str(i) for i in chunk_ids]}}
+
+    return {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "cited_chunk_ids": cited,
+            "grounded": {"type": "boolean"},
+        },
+        "required": ["answer", "cited_chunk_ids", "grounded"],
+    }
+
+
+def _cited_ids(raw: list) -> list[int]:
+    """Chunk ids as integers, whatever shape the provider returned them in.
+
+    Groq is asked for strings; Gemini and Ollama may return numbers. Anything that is not
+    a whole number is dropped rather than raising -- a malformed citation should cost one
+    citation, not the entire answer.
+    """
+    ids = []
+    for value in raw:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return ids
 
 
 def _format_context(hits: list[Hit]) -> str:
@@ -64,7 +100,7 @@ async def answer_question(
         context=_format_context(hits), question=request.question
     )
 
-    completion = await client.complete(prompt, schema=RESPONSE_SCHEMA)
+    completion = await client.complete(prompt, schema=response_schema([h.chunk_id for h in hits]))
     payload = json.loads(completion.text)
 
     thresholds = _thresholds(request)
@@ -82,7 +118,7 @@ async def answer_question(
                 heading_path=by_id[cid].heading_path,
                 chunk_id=cid,
             )
-            for cid in payload["cited_chunk_ids"]
+            for cid in _cited_ids(payload["cited_chunk_ids"])
             if cid in by_id
         ]
     )

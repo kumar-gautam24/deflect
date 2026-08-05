@@ -25,9 +25,9 @@ RUN uv sync --frozen
 # embedding model download dies with EACCES on the first /search -- a failure that no unit
 # test sees, because the tests never run inside the container.
 ENV HF_HOME=/app/.cache/huggingface
-RUN useradd --system --uid 10001 deflect \
+RUN useradd --system --uid 10001 --create-home --home-dir /home/deflect deflect \
     && mkdir -p /app/.cache/huggingface \
-    && chown -R deflect /app
+    && chown -R deflect /app /home/deflect
 USER deflect
 CMD ["gunicorn", "evals.main:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \

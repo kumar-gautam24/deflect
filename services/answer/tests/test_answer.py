@@ -147,3 +147,34 @@ async def test_search_config_passes_through_so_evals_can_sweep_variants(
 
     assert retrieval.requests[0].use_rerank is False
     assert retrieval.requests[0].final_limit == 3
+
+
+def test_citations_are_constrained_to_the_retrieved_ids():
+    """Under a strict decoding grammar a plain integer array let gpt-oss concatenate the
+    ids into one number -- [4161, 2750, 4179] came back as [4161275041794180] -- which the
+    resolver dropped, so every answer shipped with no citations. Enumerating the permitted
+    values gives the decoder literals to choose between instead of an integer to build."""
+    from answer.service import response_schema
+
+    schema = response_schema([4161, 2750, 4179])
+
+    assert schema["properties"]["cited_chunk_ids"]["items"]["enum"] == ["4161", "2750", "4179"]
+    assert schema["properties"]["cited_chunk_ids"]["items"]["type"] == "string"
+
+
+def test_an_empty_hit_set_yields_a_schema_without_an_empty_enum():
+    """An empty enum is not valid JSON Schema and the provider rejects it outright."""
+    from answer.service import response_schema
+
+    items = response_schema([])["properties"]["cited_chunk_ids"]["items"]
+
+    assert "enum" not in items
+    assert items["type"] == "string"
+
+
+def test_citation_ids_are_parsed_from_either_shape():
+    """Groq is asked for strings; other providers may return numbers. A malformed value
+    costs one citation rather than the whole answer."""
+    from answer.service import _cited_ids
+
+    assert _cited_ids(["4161", 2750, "not-an-id", None, "4179"]) == [4161, 2750, 4179]

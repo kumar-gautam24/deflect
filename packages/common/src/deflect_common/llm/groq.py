@@ -40,6 +40,22 @@ def _retry_after(response: httpx.Response) -> float:
         return FALLBACK_RETRY_SECONDS
 
 
+def _raise_for_status(response: httpx.Response) -> None:
+    """Raise on an error status, with the provider's explanation attached.
+
+    httpx's own message carries only the status line, and Groq puts the actionable part --
+    which schema key it rejected, which model lacks a capability -- in the body. A bare
+    "400 Bad Request" in a log costs an hour that the body would have saved.
+    """
+    if response.is_success:
+        return
+
+    detail = response.text[:500]
+    raise httpx.HTTPStatusError(
+        f"{response.status_code} from groq: {detail}", request=response.request, response=response
+    )
+
+
 def _strict(schema: dict) -> dict:
     """Return `schema` with additionalProperties: false on every object node.
 
@@ -126,12 +142,12 @@ class GroqClient:
             for _ in range(MAX_ATTEMPTS - 1):
                 response = await client.post(url, json=payload, headers=headers)
                 if response.status_code != 429:
-                    response.raise_for_status()
+                    _raise_for_status(response)
                     return response.json()
                 await self._sleep(_retry_after(response))
 
             # The final attempt is outside the loop so a 429 here raises like any other
             # error. A sustained outage terminates instead of retrying forever.
             response = await client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
+            _raise_for_status(response)
             return response.json()
