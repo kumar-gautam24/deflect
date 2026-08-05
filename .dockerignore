@@ -7,3 +7,7 @@
 **/*.pyc
 .git
 .superpowers
+
+# Never bake a real environment file into an image.
+.env
+**/.env

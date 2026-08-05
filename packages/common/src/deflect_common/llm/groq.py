@@ -6,6 +6,7 @@ plain HTTP, and an SDK added for one POST is a dependency bought for nothing.
 """
 
 import asyncio
+import math
 from collections.abc import Awaitable, Callable
 
 import httpx
@@ -35,9 +36,16 @@ def _retry_after(response: httpx.Response) -> float:
     once, which would spend another attempt against the same limit for nothing.
     """
     try:
-        return max(float(response.headers.get("retry-after", "")), 0.0)
+        seconds = float(response.headers.get("retry-after", ""))
     except ValueError:
         return FALLBACK_RETRY_SECONDS
+
+    # inf would sleep forever and nan raises from asyncio.sleep, so a malformed header
+    # would turn a bounded retry into a hang or a crash.
+    if not math.isfinite(seconds):
+        return FALLBACK_RETRY_SECONDS
+
+    return max(seconds, 0.0)
 
 
 def _raise_for_status(response: httpx.Response) -> None:

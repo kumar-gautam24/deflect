@@ -1,5 +1,6 @@
 import json
 
+import httpx
 import pytest
 from deflect_common.llm.fake import FakeClient
 from deflect_common.schemas import SearchRequest
@@ -154,3 +155,32 @@ async def test_a_search_variant_is_forwarded_with_the_item_question(session):
 async def test_empty_dataset_is_rejected(session):
     with pytest.raises(ValueError, match="empty dataset"):
         await run_evals(session, [], FakeAnswer([]), FakeClient([]), None, "sha")
+
+
+async def test_one_failing_item_does_not_discard_the_whole_run(session):
+    """A full pass takes roughly 110 minutes against a free-tier quota, so aborting at
+    item 47 would throw away 45 minutes and every score already computed."""
+
+    class FlakyAnswer(FakeAnswer):
+        """Fails exactly once, on the second item."""
+
+        calls = 0
+
+        async def answer(self, request):
+            type(self).calls += 1
+            if type(self).calls == 2:
+                raise httpx.ReadTimeout("provider took too long")
+            return await super().answer(request)
+
+    run = await run_evals(
+        session,
+        [item("q1"), item("q2"), item("q3")],
+        FlakyAnswer([response("Use Depends.", False)] * 3),
+        FakeClient([judged()] * 3),
+        None,
+        git_sha="abc123",
+    )
+
+    # Two of three scored: the run survives, and its lower item_count is what makes the
+    # loss visible rather than silent.
+    assert run.item_count == 2

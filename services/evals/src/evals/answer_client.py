@@ -14,7 +14,14 @@ from fastapi import HTTPException
 
 
 class AnswerClient:
-    def __init__(self, base_url: str, token: str, timeout: float = 120.0) -> None:
+    def __init__(self, base_url: str, token: str, timeout: float = 600.0) -> None:
+        """Ten minutes, not two.
+
+        The answer service may retry a provider 429 several times honouring Retry-After,
+        and on a free tier that budget can exceed two minutes. A caller timeout shorter
+        than the callee's retry budget turns a pause into a failed request, which on an
+        eval run means losing the whole run rather than one slow item.
+        """
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._timeout = timeout

@@ -49,3 +49,52 @@ def test_an_exception_is_rendered_into_the_line():
         line = json.loads(JSONFormatter().format(record))
 
     assert "ValueError: boom" in line["exception"]
+
+
+async def test_requests_are_counted_and_timed_by_route_template():
+    """Labelled by template, not raw path: /traces/17 and /traces/18 are one operation,
+    and a series per id would be an unbounded cardinality leak."""
+    import httpx
+    from fastapi import FastAPI
+    from prometheus_client import generate_latest
+
+    from deflect_common.observability import RequestIdMiddleware
+
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+
+    @app.get("/traces/{trace_id}")
+    async def one(trace_id: int) -> dict:
+        return {"id": trace_id}
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        await client.get("/traces/17")
+        await client.get("/traces/18")
+
+    exposition = generate_latest().decode()
+
+    assert 'route="/traces/{trace_id}"' in exposition
+    assert 'route="/traces/17"' not in exposition
+
+
+async def test_an_unmatched_path_does_not_mint_a_series_per_url():
+    """A 404 scan would otherwise create one time series per probed path."""
+    import httpx
+    from fastapi import FastAPI
+    from prometheus_client import generate_latest
+
+    from deflect_common.observability import RequestIdMiddleware
+
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        await client.get("/nope-a")
+        await client.get("/nope-b")
+
+    exposition = generate_latest().decode()
+
+    assert 'route="unmatched"' in exposition
+    assert "nope-a" not in exposition

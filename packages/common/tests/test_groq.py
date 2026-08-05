@@ -191,3 +191,21 @@ async def test_the_callers_schema_is_not_mutated():
     await _client(handler).complete("q", schema=original)
 
     assert "additionalProperties" not in original
+
+
+@pytest.mark.parametrize("header", ["inf", "nan", "-inf", "1e400"])
+async def test_a_non_finite_retry_after_falls_back(header):
+    """inf would sleep forever and nan raises from asyncio.sleep, so a malformed header
+    would turn a bounded retry into a hang or a crash."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"retry-after": header})
+        return httpx.Response(200, json=_completion_body())
+
+    sleeps: list[float] = []
+    await _client(handler, sleeps).complete("q")
+
+    assert sleeps and all(0 <= s < 3600 for s in sleeps)

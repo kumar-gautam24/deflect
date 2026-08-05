@@ -111,6 +111,9 @@ app.add_middleware(
     allow_origins=[o.strip() for o in get_settings().web_origin.split(",")],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
+    # Without this a browser cannot read the header at all, so the id the
+    # correlation feature exists to hand users never reaches them.
+    expose_headers=["X-Request-ID"],
 )
 
 

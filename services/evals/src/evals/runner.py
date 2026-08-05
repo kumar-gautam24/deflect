@@ -1,7 +1,11 @@
 """Executes the golden dataset against the live answer service and persists the run."""
 
+import logging
+
+import httpx
 from deflect_common.llm.base import LLMClient
 from deflect_common.schemas import AnswerRequest, AnswerResponse, SearchRequest
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from evals.answer_client import AnswerClient
@@ -9,6 +13,8 @@ from evals.dataset import GoldenItem
 from evals.judge import JUDGE_VERSION, JudgeScores, judge_answer
 from evals.metrics import hit_at_k, mrr
 from evals.models import EvalResult, EvalRun
+
+logger = logging.getLogger(__name__)
 
 
 def _mean(values: list[float]) -> float:
@@ -57,15 +63,25 @@ async def run_evals(
             question=item.question,
             search=search.model_copy(update={"query": item.question}) if search else None,
         )
-        outcome = await answer_client.answer(request)
+        # One failed item must not discard the run. A full pass takes roughly 110
+        # minutes against a free-tier quota, so aborting at item 47 throws away 45
+        # minutes of work and every score already computed. The item is skipped and the
+        # run is scored on what succeeded; a run that lost items is visible because
+        # item_count is lower than the dataset.
+        try:
+            outcome = await answer_client.answer(request)
 
-        # Judging a refusal wastes tokens: there is no answer to score, and the
-        # escalation metrics already capture whether refusing was correct.
-        scores = (
-            None
-            if outcome.escalated
-            else await judge_answer(judge_client, item, outcome.answer, outcome.hits)
-        )
+            # Judging a refusal wastes tokens: there is no answer to score, and the
+            # escalation metrics already capture whether refusing was correct.
+            scores = (
+                None
+                if outcome.escalated
+                else await judge_answer(judge_client, item, outcome.answer, outcome.hits)
+            )
+        except (httpx.HTTPError, HTTPException) as cause:
+            logger.warning("eval item %s failed and was skipped: %s", item.id, cause)
+            continue
+
         scored.append((item, outcome, scores))
 
     _, first, _ = scored[0]
@@ -76,7 +92,9 @@ async def run_evals(
         model=first.model,
         retrieval_config=search.model_dump() if search else {},
         thresholds={"min_top_score": first.min_top_score, "min_margin": first.min_margin},
-        item_count=len(items),
+        # What was actually scored, not what was asked for. A run that lost items to
+        # provider failures must not claim to have covered the whole dataset.
+        item_count=len(scored),
         metrics={},
     )
     session.add(run)
