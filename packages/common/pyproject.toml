@@ -7,6 +7,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "google-genai>=0.3",
     "httpx>=0.28",
+    "fastapi>=0.115",
 ]
 
 [dependency-groups]
