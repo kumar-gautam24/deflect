@@ -4,13 +4,13 @@ import { clientAddress } from "./client-ip";
 const headers = (init: Record<string, string>) => new Headers(init);
 
 describe("clientAddress", () => {
-  it("prefers x-real-ip, which the platform sets as a single value", () => {
-    expect(clientAddress(headers({ "x-real-ip": "203.0.113.7" }))).toBe("203.0.113.7");
+  it("ignores x-real-ip, which nothing in this stack is known to set", () => {
+    const h = headers({ "x-real-ip": "9.9.9.9", "x-forwarded-for": "203.0.113.7" });
+    expect(clientAddress(h)).toBe("203.0.113.7");
   });
 
-  it("ignores a visitor-supplied forwarded list when x-real-ip is present", () => {
-    const h = headers({ "x-real-ip": "203.0.113.7", "x-forwarded-for": "1.2.3.4" });
-    expect(clientAddress(h)).toBe("203.0.113.7");
+  it("returns null when only x-real-ip is present, so no key is derived from it", () => {
+    expect(clientAddress(headers({ "x-real-ip": "9.9.9.9" }))).toBeNull();
   });
 
   it("takes the rightmost hop, which the nearest trusted proxy added", () => {
