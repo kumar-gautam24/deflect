@@ -77,16 +77,22 @@ export async function* askStream(question: string): AsyncGenerator<AskEvent> {
 const ANSWER_URL = process.env.ANSWER_URL ?? "http://localhost:8002";
 const EVALS_URL = process.env.EVALS_URL ?? "http://localhost:8003";
 
-async function getJSONFrom<T>(base: string, path: string): Promise<T> {
-  const response = await fetch(`${base}${path}`, { cache: "no-store" });
+async function getJSONFrom<T>(base: string, path: string, token?: string): Promise<T> {
+  const response = await fetch(`${base}${path}`, {
+    cache: "no-store",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
   if (!response.ok) throw new Error(`${path} returned ${response.status}`);
   return response.json();
 }
 
+// Traces are operator-only, so this server component carries the operator token. The
+// browser never sees it.
 export function getFromAnswer<T>(path: string): Promise<T> {
-  return getJSONFrom<T>(ANSWER_URL, path);
+  return getJSONFrom<T>(ANSWER_URL, path, process.env.OPERATOR_TOKEN);
 }
 
+// The eval dashboard is public and needs no credential.
 export function getFromEvals<T>(path: string): Promise<T> {
   return getJSONFrom<T>(EVALS_URL, path);
 }
