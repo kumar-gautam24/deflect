@@ -65,3 +65,13 @@ def test_a_prefix_collision_is_not_treated_as_containment(tmp_path):
         resolve_corpus_path(str(sibling), root)
 
     assert raised.value.status_code == 400
+
+
+@pytest.mark.parametrize("malformed", ["/corpus/\x00", "\x00", "\x00/etc"])
+def test_a_path_that_cannot_be_resolved_is_rejected_as_invalid_input(tmp_path, malformed):
+    """A NUL byte makes resolve() raise. An endpoint whose job is validating a path
+    should call that invalid input, not crash on it."""
+    with pytest.raises(HTTPException) as raised:
+        resolve_corpus_path(malformed, tmp_path)
+
+    assert raised.value.status_code == 400

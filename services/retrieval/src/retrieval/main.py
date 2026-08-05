@@ -63,7 +63,15 @@ def resolve_corpus_path(root: str, corpus_root: Path) -> Path:
     caught, not only a literal `..`. is_relative_to compares path components rather
     than string prefixes, so a sibling named corpus-secrets does not pass as /corpus.
     """
-    requested = Path(root).resolve()
+    try:
+        requested = Path(root).resolve()
+    except (ValueError, OSError) as cause:
+        # A path that cannot even be resolved is invalid input, not a server fault.
+        # Same message as the containment rejection: a caller learns only that the
+        # path was refused, never which of the two checks refused it.
+        raise HTTPException(
+            status_code=400, detail="ingest root is outside the corpus root"
+        ) from cause
     allowed = corpus_root.resolve()
 
     if requested != allowed and not requested.is_relative_to(allowed):
