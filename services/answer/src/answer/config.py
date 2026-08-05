@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_answer"
     retrieval_url: str = "http://localhost:8001"
 
+    # Empty by default so a deployment that forgets them fails at import rather than
+    # serving open routes. docker-compose supplies development values.
+    service_token: str = ""
+    operator_token: str = ""
+
     llm_provider: str = "gemini"
     generation_model: str = "gemini-2.0-flash"
     gemini_api_key: str = ""

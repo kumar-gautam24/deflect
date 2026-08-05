@@ -1,15 +1,23 @@
-import json
+import os
 
-import pytest
-import pytest_asyncio
-from deflect_common.llm.fake import FakeClient
-from deflect_common.schemas import Hit
-from doubles import FakeRetrieval, hit
-from sqlalchemy.ext.asyncio import AsyncSession
+# Set before importing anything under answer.*: config is read at import and
+# bearer_guard refuses to build on an empty token. Assigned rather than setdefault so an
+# exported token in the developer's shell cannot diverge from what the tests send.
+os.environ["SERVICE_TOKEN"] = "test-service-token"
+os.environ["OPERATOR_TOKEN"] = "test-operator-token"
 
-from answer.db import engine, get_session
-from answer.main import app as fastapi_app
-from answer.main import build_client, build_retrieval
+import json  # noqa: E402
+
+import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
+from deflect_common.llm.fake import FakeClient  # noqa: E402
+from deflect_common.schemas import Hit  # noqa: E402
+from doubles import FakeRetrieval, hit  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
+
+from answer.db import engine, get_session  # noqa: E402
+from answer.main import app as fastapi_app  # noqa: E402
+from answer.main import build_client, build_retrieval  # noqa: E402
 
 
 @pytest_asyncio.fixture

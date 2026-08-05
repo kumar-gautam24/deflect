@@ -11,17 +11,31 @@ from fastapi import HTTPException
 
 
 class RetrievalClient:
-    def __init__(self, base_url: str, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, token: str, timeout: float = 30.0) -> None:
         self._base_url = base_url.rstrip("/")
+        self._token = token
         self._timeout = timeout
 
     async def search(self, request: SearchRequest) -> SearchResponse:
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(
-                    f"{self._base_url}/search", json=request.model_dump()
+                    f"{self._base_url}/search",
+                    json=request.model_dump(),
+                    headers={"Authorization": f"Bearer {self._token}"},
                 )
                 response.raise_for_status()
+        except httpx.HTTPStatusError as cause:
+            # A 401 from retrieval is a misconfigured deployment, not an outage. Reporting
+            # it as 503 would tell an operator to wait for a service that will never
+            # recover on its own.
+            if cause.response.status_code == 401:
+                raise HTTPException(
+                    status_code=500, detail="retrieval rejected this service's credential"
+                ) from cause
+            raise HTTPException(
+                status_code=503, detail=f"retrieval service unavailable: {cause}"
+            ) from cause
         except httpx.HTTPError as cause:
             raise HTTPException(
                 status_code=503, detail=f"retrieval service unavailable: {cause}"

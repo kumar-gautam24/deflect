@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
+from deflect_common.auth import bearer_guard
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.schemas import AnswerRequest, AnswerResponse
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
@@ -43,6 +44,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Deflect answer", lifespan=lifespan)
 router = APIRouter()
 
+# Built at import, not in the lifespan: an unset token aborts this module and uvicorn
+# exits before binding a port. Module-level names are what dependency_overrides keys on.
+require_service = bearer_guard(get_settings().service_token, "service")
+require_operator = bearer_guard(get_settings().operator_token, "operator")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in get_settings().web_origin.split(",")],
@@ -56,7 +62,8 @@ def build_client(request: Request) -> LLMClient:
 
 
 def build_retrieval() -> RetrievalClient:
-    return RetrievalClient(get_settings().retrieval_url)
+    settings = get_settings()
+    return RetrievalClient(settings.retrieval_url, settings.service_token)
 
 
 ClientDep = Annotated[LLMClient, Depends(build_client)]
@@ -91,7 +98,7 @@ async def health(session: SessionDep) -> dict[str, str]:
     return {"status": "ok", "database": "connected"}
 
 
-@router.post("/answer")
+@router.post("/answer", dependencies=[Depends(require_service)])
 async def answer(
     request: AnswerRequest,
     session: SessionDep,
@@ -126,13 +133,13 @@ async def ask(
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-@router.get("/traces")
+@router.get("/traces", dependencies=[Depends(require_operator)])
 async def list_traces(session: SessionDep) -> list[dict]:
     statement = select(Trace).order_by(Trace.id.desc()).limit(100)
     return [_serialize(trace) for trace in (await session.execute(statement)).scalars()]
 
 
-@router.get("/traces/{trace_id}")
+@router.get("/traces/{trace_id}", dependencies=[Depends(require_operator)])
 async def get_trace(trace_id: int, session: SessionDep) -> dict:
     trace = await session.get(Trace, trace_id)
     if trace is None:

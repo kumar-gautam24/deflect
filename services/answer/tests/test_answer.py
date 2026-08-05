@@ -99,7 +99,8 @@ async def test_retrieval_being_down_returns_503_rather_than_answering(
     nothing listens on, so the httpx error and its translation are both real.
     """
     app = make_app(
-        [answer_payload("x", [], True)], RetrievalClient("http://127.0.0.1:1", timeout=1.0)
+        [answer_payload("x", [], True)],
+        RetrievalClient("http://127.0.0.1:1", "test-service-token", timeout=1.0),
     )
 
     response = await post(app, "/answer", {"question": "how do I declare a dependency"})
