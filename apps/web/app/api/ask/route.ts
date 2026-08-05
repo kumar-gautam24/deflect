@@ -1,3 +1,5 @@
+import { clientAddress } from "@/lib/client-ip";
+
 const ANSWER_URL = process.env.ANSWER_URL ?? "http://localhost:8002";
 const SERVICE_TOKEN = process.env.SERVICE_TOKEN ?? "";
 
@@ -7,14 +9,19 @@ export async function POST(request: Request) {
   // The service token is not what authorises the question -- /ask is open. It is what
   // makes the forwarded address believable: without it the answer service would fall
   // back to this proxy's own address and rate limit every visitor as one caller.
-  const forwardedFor = request.headers.get("x-forwarded-for");
+  //
+  // The address is computed and overwritten here, never relayed. X-Forwarded-For is a
+  // header the visitor can set; passing their value through with this service's token
+  // attached would let them mint a fresh rate-limit key per request, which is the whole
+  // thing the limiter exists to prevent.
+  const address = clientAddress(request.headers);
 
   const upstream = await fetch(`${ANSWER_URL}/ask`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${SERVICE_TOKEN}`,
-      ...(forwardedFor ? { "X-Forwarded-For": forwardedFor } : {}),
+      ...(address ? { "X-Forwarded-For": address } : {}),
     },
     body: await request.text(),
   });
