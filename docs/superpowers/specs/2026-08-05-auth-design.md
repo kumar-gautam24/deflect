@@ -138,7 +138,11 @@ running flat out for a full day. Raising the per-IP limit past 21 breaks that pr
 lets a single scripted client lock everyone else out, so the two should be re-derived
 together if either changes.
 
-`retrieval` gains a `lifespan` it does not currently have, to hold the startup guard.
+Guards are built at module import, not inside a `lifespan`. `bearer_guard` raising on an
+empty token then aborts the import of `main.py`, so uvicorn exits before binding a port —
+strictly earlier than a lifespan hook, and it spares `retrieval` a lifespan it otherwise
+has no use for. Building them at import also makes each guard a stable module-level
+callable, which is what `app.dependency_overrides` keys on when tests bypass one.
 
 Every service needs both tokens, though for different reasons, which is why the startup
 guard requires both everywhere: retrieval validates both on inbound requests; answer
