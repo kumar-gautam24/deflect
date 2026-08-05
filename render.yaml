@@ -6,7 +6,9 @@ services:
     runtime: docker
     dockerfilePath: ./services/retrieval/Dockerfile
     dockerContext: .
-    healthCheckPath: /health
+    # Readiness, not liveness: this decides whether a deploy can serve traffic,
+    # not merely whether its process exists.
+    healthCheckPath: /ready
     envVars:
       - key: DATABASE_URL
         sync: false
@@ -16,6 +18,8 @@ services:
         sync: false
       - key: OPERATOR_TOKEN
         sync: false
+      - key: ENV
+        sync: false
       - key: CORPUS_ROOT
         sync: false
 
@@ -24,11 +28,15 @@ services:
     runtime: docker
     dockerfilePath: ./services/answer/Dockerfile
     dockerContext: .
-    healthCheckPath: /health
+    # Readiness, not liveness: this decides whether a deploy can serve traffic,
+    # not merely whether its process exists.
+    healthCheckPath: /ready
     envVars:
       - key: DATABASE_URL
         sync: false
       - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
         sync: false
       - key: WEB_ORIGIN
         sync: false
@@ -43,17 +51,23 @@ services:
         sync: false
       - key: OPERATOR_TOKEN
         sync: false
+      - key: ENV
+        sync: false
 
   - type: web
     name: deflect-evals
     runtime: docker
     dockerfilePath: ./services/evals/Dockerfile
     dockerContext: .
-    healthCheckPath: /health
+    # Readiness, not liveness: this decides whether a deploy can serve traffic,
+    # not merely whether its process exists.
+    healthCheckPath: /ready
     envVars:
       - key: DATABASE_URL
         sync: false
       - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
         sync: false
       - key: ANSWER_URL
         sync: false
@@ -62,4 +76,6 @@ services:
       - key: SERVICE_TOKEN
         sync: false
       - key: OPERATOR_TOKEN
+        sync: false
+      - key: ENV
         sync: false

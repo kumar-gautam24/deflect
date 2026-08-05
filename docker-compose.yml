@@ -25,6 +25,7 @@ services:
       dockerfile: services/retrieval/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_retrieval
+      ENV: ${ENV:-development}
       SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
       OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
       CORPUS_ROOT: /corpus
@@ -41,8 +42,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_answer
       RETRIEVAL_URL: http://retrieval:8001
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      ENV: ${ENV:-development}
       SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
       OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
     ports: ["${ANSWER_PORT:-8002}:8002"]
@@ -60,9 +63,11 @@ services:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_evals
       ANSWER_URL: http://answer:8002
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       DATASET_PATH: /app/evals/golden.yaml
       GIT_SHA: ${GIT_SHA:-unknown}
+      ENV: ${ENV:-development}
       SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
       OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
     ports: ["${EVALS_PORT:-8003}:8003"]

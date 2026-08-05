@@ -155,15 +155,15 @@ obscure the parts worth understanding.
 
 | service | route | principal |
 | --- | --- | --- |
-| retrieval | `GET /health` | public |
+| all three | `GET /health` (liveness), `GET /ready` (readiness) | public |
+| all three | `GET /metrics` | service |
+| all three | `/docs`, `/redoc`, `/openapi.json` | public in development, absent when `ENV=production` |
 | retrieval | `GET /documents` | service |
 | retrieval | `POST /search` | service |
 | retrieval | `POST /ingest` | operator, plus path confinement |
-| answer | `GET /health` | public |
 | answer | `POST /ask` | public, rate limited |
 | answer | `POST /answer` | service |
 | answer | `GET /traces`, `GET /traces/{id}` | operator |
-| evals | `GET /health` | public |
 | evals | `POST /runs` | operator |
 | evals | `GET /eval-runs`, `/eval-runs/diff`, `/eval-runs/{id}` | public |
 
@@ -191,6 +191,24 @@ against the retrieval service's `/documents` endpoint, because a typo there woul
 like a permanent retrieval regression rather than a bad label. It skips when that
 service is unreachable so the unit suite stays runnable alone; CI sets
 `REQUIRE_CORPUS_CHECK` so an unreachable service fails the build instead.
+
+### Which model produced these numbers
+
+The generation metrics are produced with `openai/gpt-oss-20b` generating and
+`openai/gpt-oss-120b` judging, both on Groq's free tier. The judge is deliberately the
+stronger model: a judge no stronger than the generator rates its own phrasing highly, and
+the numbers stop meaning anything.
+
+An earlier set was produced with `gemini-2.0-flash` generating and `gemini-2.0-pro`
+judging. Those are kept in git history rather than shown here, because reproducing them
+needs a Gemini key this deployment does not have.
+
+A side-by-side provider comparison was considered and rejected. Doing it honestly needs
+one judge scoring both generators; otherwise the generator and the judge both change and
+the table cannot attribute a difference to either, which is worse than one honest column.
+
+**The retrieval tables above are unaffected.** They are deterministic and LLM-free, and
+were produced without any provider key at all.
 
 Metrics are split into two families:
 
@@ -238,7 +256,8 @@ npm run dev
    one only, then apply each service's migrations against its own `DATABASE_URL`.
 2. **Render** — deploy from `render.yaml`. It wires `RETRIEVAL_URL` and `ANSWER_URL`
    between services; set each `DATABASE_URL` (Neon pooled string, with the
-   `postgresql+asyncpg://` prefix), `GEMINI_API_KEY`, `WEB_ORIGIN`, `SERVICE_TOKEN`, and
+   `postgresql+asyncpg://` prefix), `GROQ_API_KEY`, `WEB_ORIGIN`, `ENV=production`,
+   `SERVICE_TOKEN`, and
    `OPERATOR_TOKEN`. The same `SERVICE_TOKEN` must be given to all three services, since
    each one both presents it and checks it on incoming calls.
 3. **Vercel** — deploy `apps/web` with `ANSWER_URL` and `EVALS_URL` set to the
@@ -247,10 +266,38 @@ npm run dev
 `WEB_ORIGIN` is what the answer service's CORS allowlist reads, so the deployed
 frontend must be named there or browser requests are rejected.
 
-`GEMINI_API_KEY` is required by the answer and evals services, which refuse to start
-without it rather than failing on the first request. The retrieval service needs no
-provider key, and so do the ablation and threshold sweep — every table above was
-produced without one.
+`GROQ_API_KEY` is required by the answer and evals services, which refuse to start
+without it rather than failing on the first request — and refuse equally if the configured
+model cannot produce schema-constrained output, since the answer path cannot work without
+it. The retrieval service needs no provider key, and neither do the ablation and threshold
+sweep: every retrieval table above was produced without one.
+
+Groq's free tier allows 8,000 tokens a minute, which is what makes an eval run slow rather
+than expensive — roughly 110 minutes for the full 80-item dataset. The client retries a 429
+honouring `Retry-After`, so a run pauses instead of dying partway and leaving a partial
+row. For the same reason the ten-item CI gate runs on pushes to `main` and nightly rather
+than on every pull request: fourteen minutes per PR trains people to ignore a gate.
+
+### Running in production
+
+Each service runs under gunicorn with the uvicorn worker class. Retrieval and evals use
+two workers; **the answer service uses exactly one, deliberately.** Its per-address rate
+limiter is an in-process dictionary, so N workers would mean N independent limiters and a
+twenty-per-hour limit would silently become twenty N. That service awaits a model provider
+rather than burning CPU, so workers would buy it almost nothing anyway. Raising it weakens
+the abuse control; when a job queue brings shared storage, the limiter moves there.
+
+`/health` is liveness and touches no dependency — a probe that queried the database would
+have an orchestrator restart healthy processes during a Postgres hiccup. `/ready` checks
+only the service's own database, and deliberately does not probe the services it calls: a
+readiness check that follows its dependencies turns one outage into all three reporting
+unready, amplifying the failure instead of containing it.
+
+Every request carries an `X-Request-ID`, adopted from the caller when present and minted
+otherwise, forwarded across each service hop and included in every JSON log line — so one
+question's path through three services reassembles into a single story.
+
+Containers run as a non-root user and pin their base image by digest.
 
 ### Tests
 
@@ -260,7 +307,7 @@ for s in retrieval answer evals; do (cd services/$s && uv run pytest -q); done
 cd apps/web && npm test
 ```
 
-132 service tests (45 retrieval, 43 answer, 44 evals), 24 for the shared contracts, and
+158 service tests (49 retrieval, 58 answer, 51 evals), 40 for the shared contracts, and
 24 component tests. Each service's suite runs against its own test
 database and needs nothing else: the answer service's tests use a fake retrieval, and
 the eval service's tests use a fake answer service, so neither needs a vector database,
