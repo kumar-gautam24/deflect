@@ -16,9 +16,16 @@ COPY services/answer .
 RUN uv sync --no-dev --frozen
 
 
-# Runs as a non-root user: a container process that does not need root should not have it,
-# and this costs nothing to arrange.
-RUN useradd --system --uid 10001 deflect && chown -R deflect /app
+# Runs as a non-root user: a container process that does not need root should not have it.
+#
+# HF_HOME is set explicitly and created before the switch. useradd without -m leaves no
+# home directory, so huggingface_hub falls back to a path this user cannot write and the
+# embedding model download dies with EACCES on the first /search -- a failure that no unit
+# test sees, because the tests never run inside the container.
+ENV HF_HOME=/app/.cache/huggingface
+RUN useradd --system --uid 10001 deflect \
+    && mkdir -p /app/.cache/huggingface \
+    && chown -R deflect /app
 USER deflect
 # EXACTLY ONE WORKER, deliberately. The per-address rate limiter in ratelimit.py is an
 # in-process dict, so N workers would mean N independent limiters and a 20-per-hour limit

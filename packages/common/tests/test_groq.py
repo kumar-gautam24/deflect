@@ -52,7 +52,11 @@ async def test_a_schema_is_sent_as_a_strict_json_schema():
 
     assert captured["response_format"]["type"] == "json_schema"
     assert captured["response_format"]["json_schema"]["strict"] is True
-    assert captured["response_format"]["json_schema"]["schema"] == {"type": "object"}
+    # additionalProperties is added on the way out; Groq rejects the schema without it.
+    assert captured["response_format"]["json_schema"]["schema"] == {
+        "type": "object",
+        "additionalProperties": False,
+    }
 
 
 async def test_no_response_format_is_sent_without_a_schema():
@@ -150,3 +154,40 @@ async def test_a_non_429_error_is_not_retried():
         await _client(handler).complete("q")
 
     assert calls["n"] == 1
+
+
+async def test_a_schema_gains_additional_properties_false_at_every_depth():
+    """Groq's strict mode rejects any object node without it. Adding it here rather than
+    in every caller keeps the provider out of shared code."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json=_completion_body())
+
+    nested = {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "meta": {"type": "object", "properties": {"n": {"type": "integer"}}},
+            "rows": {"type": "array", "items": {"type": "object", "properties": {}}},
+        },
+    }
+    await _client(handler).complete("q", schema=nested)
+
+    sent = captured["response_format"]["json_schema"]["schema"]
+    assert sent["additionalProperties"] is False
+    assert sent["properties"]["meta"]["additionalProperties"] is False
+    assert sent["properties"]["rows"]["items"]["additionalProperties"] is False
+
+
+async def test_the_callers_schema_is_not_mutated():
+    """Callers pass module-level constants; mutating one would rewrite it process-wide."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_completion_body())
+
+    original = {"type": "object", "properties": {"a": {"type": "string"}}}
+    await _client(handler).complete("q", schema=original)
+
+    assert "additionalProperties" not in original

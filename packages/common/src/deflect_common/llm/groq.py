@@ -40,6 +40,30 @@ def _retry_after(response: httpx.Response) -> float:
         return FALLBACK_RETRY_SECONDS
 
 
+def _strict(schema: dict) -> dict:
+    """Return `schema` with additionalProperties: false on every object node.
+
+    Groq's strict mode rejects a schema without it, on every object, at any depth. Applied
+    here rather than asked of callers: Gemini and Ollama need no such key, so making every
+    caller carry a Groq-specific field would leak this provider into the shared code that
+    exists precisely to hide it.
+
+    Builds new dicts rather than mutating, because callers pass module-level constants and
+    a mutation would quietly rewrite one for the whole process.
+    """
+    if schema.get("type") == "object":
+        schema = schema | {"additionalProperties": False}
+        properties = schema.get("properties")
+        if properties:
+            schema = schema | {"properties": {k: _strict(v) for k, v in properties.items()}}
+
+    items = schema.get("items")
+    if isinstance(items, dict):
+        schema = schema | {"items": _strict(items)}
+
+    return schema
+
+
 class GroqClient:
     def __init__(
         self,
@@ -80,7 +104,7 @@ class GroqClient:
         if schema is not None:
             payload["response_format"] = {
                 "type": "json_schema",
-                "json_schema": {"name": "response", "strict": True, "schema": schema},
+                "json_schema": {"name": "response", "strict": True, "schema": _strict(schema)},
             }
 
         body = await self._post(payload)

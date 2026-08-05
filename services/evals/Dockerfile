@@ -18,9 +18,16 @@ COPY services/evals .
 RUN uv sync --frozen
 
 
-# Runs as a non-root user: a container process that does not need root should not have it,
-# and this costs nothing to arrange.
-RUN useradd --system --uid 10001 deflect && chown -R deflect /app
+# Runs as a non-root user: a container process that does not need root should not have it.
+#
+# HF_HOME is set explicitly and created before the switch. useradd without -m leaves no
+# home directory, so huggingface_hub falls back to a path this user cannot write and the
+# embedding model download dies with EACCES on the first /search -- a failure that no unit
+# test sees, because the tests never run inside the container.
+ENV HF_HOME=/app/.cache/huggingface
+RUN useradd --system --uid 10001 deflect \
+    && mkdir -p /app/.cache/huggingface \
+    && chown -R deflect /app
 USER deflect
 CMD ["gunicorn", "evals.main:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
