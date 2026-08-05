@@ -27,7 +27,22 @@ require_operator = bearer_guard(_settings.operator_token, "operator")
 
 
 @app.get("/health")
-async def health(session: SessionDep) -> dict[str, str]:
+async def health() -> dict[str, str]:
+    """Liveness: this process is answering. Deliberately touches no dependency -- a
+    probe that queries the database restarts a healthy process whenever Postgres
+    hiccups, which is the opposite of what liveness is for."""
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready(session: SessionDep) -> dict[str, str]:
+    """Readiness: this service can do useful work. Checks only its OWN database.
+
+    It deliberately does not probe the services it calls. A readiness check that
+    follows its dependencies turns one outage into all three reporting unready, so an
+    orchestrator restarts healthy processes and the failure amplifies instead of
+    staying contained.
+    """
     await session.execute(text("select 1"))
     return {"status": "ok", "database": "connected"}
 
