@@ -1,4 +1,6 @@
-FROM python:3.12-slim
+# Pinned by digest: the slim tag moves, so an unpinned base means two builds of the same
+# commit can differ.
+FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 # The image mirrors the repository layout rather than flattening it: this service's
@@ -15,4 +17,13 @@ COPY evals /app/evals
 COPY services/evals .
 RUN uv sync --frozen
 
-CMD ["uvicorn", "evals.main:app", "--host", "0.0.0.0", "--port", "8003"]
+
+# Runs as a non-root user: a container process that does not need root should not have it,
+# and this costs nothing to arrange.
+RUN useradd --system --uid 10001 deflect && chown -R deflect /app
+USER deflect
+CMD ["gunicorn", "evals.main:app", \
+     "--worker-class", "uvicorn.workers.UvicornWorker", \
+     "--workers", "2", "--bind", "0.0.0.0:8003", \
+     "--graceful-timeout", "30", "--timeout", "120"]
+

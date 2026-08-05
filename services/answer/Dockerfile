@@ -1,4 +1,6 @@
-FROM python:3.12-slim
+# Pinned by digest: the slim tag moves, so an unpinned base means two builds of the same
+# commit can differ.
+FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 # The image mirrors the repository layout rather than flattening it: this service's
@@ -13,4 +15,20 @@ RUN uv sync --no-dev --frozen --no-install-project
 COPY services/answer .
 RUN uv sync --no-dev --frozen
 
-CMD ["uvicorn", "answer.main:app", "--host", "0.0.0.0", "--port", "8002"]
+
+# Runs as a non-root user: a container process that does not need root should not have it,
+# and this costs nothing to arrange.
+RUN useradd --system --uid 10001 deflect && chown -R deflect /app
+USER deflect
+# EXACTLY ONE WORKER, deliberately. The per-address rate limiter in ratelimit.py is an
+# in-process dict, so N workers would mean N independent limiters and a 20-per-hour limit
+# would silently become 20N. This service awaits a model provider rather than burning CPU,
+# so async concurrency already carries its load and workers would buy almost nothing anyway.
+#
+# When the job queue arrives and brings Redis, the limiter moves there and this can scale
+# out. Until then, raising this number weakens the abuse control.
+CMD ["gunicorn", "answer.main:app", \
+     "--worker-class", "uvicorn.workers.UvicornWorker", \
+     "--workers", "1", "--bind", "0.0.0.0:8002", \
+     "--graceful-timeout", "30", "--timeout", "300"]
+

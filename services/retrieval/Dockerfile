@@ -1,4 +1,6 @@
-FROM python:3.12-slim
+# Pinned by digest: the slim tag moves, so an unpinned base means two builds of the same
+# commit can differ.
+FROM python:3.12-slim@sha256:646fb0bca3dd3ea1bcc6feb72c17ed16eed6e10cffc732fcc1478bd3e7f02d7b
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 # The image mirrors the repository layout rather than flattening it: this service's
@@ -13,4 +15,16 @@ RUN uv sync --no-dev --frozen --no-install-project
 COPY services/retrieval .
 RUN uv sync --no-dev --frozen
 
-CMD ["uvicorn", "retrieval.main:app", "--host", "0.0.0.0", "--port", "8001"]
+
+# Runs as a non-root user: a container process that does not need root should not have it,
+# and this costs nothing to arrange.
+RUN useradd --system --uid 10001 deflect && chown -R deflect /app
+USER deflect
+# Two workers because retrieval embeds and reranks in-process, which is CPU-bound and
+# blocks the event loop -- async concurrency alone does not help there. Gunicorn also
+# brings graceful shutdown, so in-flight requests finish on SIGTERM.
+CMD ["gunicorn", "retrieval.main:app", \
+     "--worker-class", "uvicorn.workers.UvicornWorker", \
+     "--workers", "2", "--bind", "0.0.0.0:8001", \
+     "--graceful-timeout", "30", "--timeout", "120"]
+
