@@ -2,14 +2,14 @@ from pathlib import Path
 
 from deflect_common.auth import bearer_guard
 from deflect_common.logging import configure_logging
-from deflect_common.observability import RequestIdMiddleware
+from deflect_common.observability import RequestIdMiddleware, metrics_response
 from deflect_common.schemas import (
     IngestRequest,
     IngestResponse,
     SearchRequest,
     SearchResponse,
 )
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Response
 from sqlalchemy import select, text
 
 from retrieval.config import get_settings
@@ -18,7 +18,15 @@ from retrieval.ingest.pipeline import ingest_directory
 from retrieval.models import Document
 from retrieval.pipeline import RetrievalConfig, retrieve
 
-app = FastAPI(title="Deflect retrieval")
+# Interactive docs are an inventory of the attack surface, and nobody browses them on a
+# deployed service. Disabled in production; the policy table records that they are public
+# in development and absent otherwise.
+_docs = (
+    {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    if get_settings().env == "production"
+    else {}
+)
+app = FastAPI(title="Deflect retrieval", **_docs)
 configure_logging()
 app.add_middleware(RequestIdMiddleware)
 
@@ -107,3 +115,8 @@ async def ingest(request: IngestRequest, session: SessionDep) -> IngestResponse:
     count = await ingest_directory(session, root, request.commit_sha)
     await session.commit()
     return IngestResponse(chunks=count)
+
+
+@app.get("/metrics", dependencies=[Depends(require_service)])
+async def metrics() -> Response:
+    return metrics_response()

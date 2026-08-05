@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 32
     rerank_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"
 
+    # Interactive API docs are useful in development and are an inventory of the attack
+    # surface in production, where nobody is browsing them anyway.
+    env: str = "development"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -8,6 +8,7 @@ dependencies = [
     "google-genai>=0.3",
     "httpx>=0.28",
     "fastapi>=0.115",
+    "prometheus-client>=0.21",
 ]
 
 [dependency-groups]

@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
 
+    # Interactive API docs are useful in development and are an inventory of the attack
+    # surface in production, where nobody is browsing them anyway.
+    env: str = "development"
+
     @property
     def provider_api_key(self) -> str:
         """The credential for the configured provider. Passing gemini_api_key whatever

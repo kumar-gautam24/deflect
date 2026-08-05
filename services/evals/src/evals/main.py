@@ -5,9 +5,9 @@ from typing import Annotated
 from deflect_common.auth import bearer_guard
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.logging import configure_logging
-from deflect_common.observability import RequestIdMiddleware
+from deflect_common.observability import RequestIdMiddleware, metrics_response
 from deflect_common.schemas import RunEvalsRequest
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,7 +65,15 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Deflect evals", lifespan=lifespan)
+# Interactive docs are an inventory of the attack surface, and nobody browses them on a
+# deployed service. Disabled in production; the policy table records that they are public
+# in development and absent otherwise.
+_docs = (
+    {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    if get_settings().env == "production"
+    else {}
+)
+app = FastAPI(title="Deflect evals", lifespan=lifespan, **_docs)
 configure_logging()
 app.add_middleware(RequestIdMiddleware)
 router = APIRouter()
@@ -74,11 +82,10 @@ router = APIRouter()
 # expensive operation in the system reachable by anyone.
 require_operator = bearer_guard(get_settings().operator_token, "operator")
 
-# Built but never attached to a route: no evals route has the service principal. It
-# exists so an unset SERVICE_TOKEN aborts this import, the same as it does in the other
-# two services. This service presents that token outbound to the answer service, and a
-# deploy that forgot it should refuse to start rather than fail partway through a run.
-_require_service_at_startup = bearer_guard(get_settings().service_token, "service")
+# Guards /metrics, and its construction aborts the import when SERVICE_TOKEN is unset, so
+# a deploy that forgot the credential refuses to start rather than failing partway through
+# an eval run.
+require_service = bearer_guard(get_settings().service_token, "service")
 
 
 def build_judge(request: Request) -> LLMClient:
@@ -220,6 +227,11 @@ async def get_run(run_id: int, session: SessionDep) -> dict:
     run = await _load_run(session, run_id)
     results = await _results_for(session, run_id)
     return _run_summary(run) | {"results": [_result_row(r) for r in results]}
+
+
+@router.get("/metrics", dependencies=[Depends(require_service)])
+async def metrics() -> Response:
+    return metrics_response()
 
 
 app.include_router(router)

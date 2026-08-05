@@ -3,6 +3,7 @@
 import uuid
 from collections.abc import Awaitable, Callable
 
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -33,3 +34,12 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         # Echoed so a caller can quote it in a bug report.
         response.headers[HEADER] = current
         return response
+
+
+def metrics_response() -> Response:
+    """Prometheus exposition for the default registry.
+
+    Guarded by the service principal at every call site: request volumes and latencies
+    are operational intelligence, and every route in this system has a principal.
+    """
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

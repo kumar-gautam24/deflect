@@ -38,6 +38,10 @@ class Settings(BaseSettings):
 
     web_origin: str = "http://localhost:3000"
 
+    # Interactive API docs are useful in development and are an inventory of the attack
+    # surface in production, where nobody is browsing them anyway.
+    env: str = "development"
+
     # Derived together, not independently. At the gemini-2.0-flash prices in
     # telemetry.py a five-chunk question costs about $0.00055, so 500 a day caps a
     # fully abused day near $0.28 -- roughly $8.50 a month sustained, an order of

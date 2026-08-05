@@ -9,9 +9,9 @@ from typing import Annotated
 from deflect_common.auth import bearer_guard, token_matches
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.logging import configure_logging
-from deflect_common.observability import RequestIdMiddleware
+from deflect_common.observability import RequestIdMiddleware, metrics_response
 from deflect_common.schemas import AnswerRequest, AnswerResponse
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
@@ -51,7 +51,15 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Deflect answer", lifespan=lifespan)
+# Interactive docs are an inventory of the attack surface, and nobody browses them on a
+# deployed service. Disabled in production; the policy table records that they are public
+# in development and absent otherwise.
+_docs = (
+    {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    if get_settings().env == "production"
+    else {}
+)
+app = FastAPI(title="Deflect answer", lifespan=lifespan, **_docs)
 configure_logging()
 app.add_middleware(RequestIdMiddleware)
 router = APIRouter()
@@ -209,6 +217,11 @@ async def get_trace(trace_id: int, session: SessionDep) -> dict:
     if trace is None:
         raise HTTPException(status_code=404, detail=f"trace {trace_id} not found")
     return _serialize(trace)
+
+
+@router.get("/metrics", dependencies=[Depends(require_service)])
+async def metrics() -> Response:
+    return metrics_response()
 
 
 app.include_router(router)
