@@ -1,4 +1,7 @@
-from answer.config import Settings
+import pytest
+
+from answer.config import Settings, get_settings
+from answer.main import _make_client
 from answer.telemetry import PRICING, estimate_cost
 
 
@@ -27,3 +30,41 @@ def test_both_groq_models_are_priced():
 def test_the_default_provider_is_groq():
     assert Settings().llm_provider == "groq"
     assert Settings().generation_model == "openai/gpt-oss-20b"
+
+
+def test_the_service_refuses_to_build_a_client_without_a_provider_key(monkeypatch):
+    """The design leans on a misconfigured deploy failing at startup rather than serving
+    broken answers, and nothing else covers it: the suites override build_client with a
+    fake and ASGITransport never runs the lifespan."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="groq api key"):
+            _make_client()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_the_service_refuses_a_model_it_cannot_constrain(monkeypatch):
+    """Only the gpt-oss family accepts json_schema, and the answer path cannot work
+    without it, so this is a startup failure rather than a bad answer later."""
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    monkeypatch.setenv("GENERATION_MODEL", "llama-3.3-70b-versatile")
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="llama-3.3-70b-versatile"):
+            _make_client()
+    finally:
+        get_settings.cache_clear()
+
+
+def test_a_correctly_configured_service_builds_its_client(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("GROQ_API_KEY", "test-groq-key")
+    get_settings.cache_clear()
+    try:
+        assert _make_client() is not None
+    finally:
+        get_settings.cache_clear()
