@@ -100,8 +100,15 @@ sleeping.
 
 The global daily cap is a function, not a class: one `count(*)` over `traces` where
 `created_at >= utc_midnight`. The answer service already writes a trace row per question,
-so the day's spend counter already exists. No new table, no migration, and it survives
-restarts.
+so the day's counter already exists. No new table, no migration, and it survives restarts.
+
+**It counts questions rather than summing `cost_usd`, deliberately.** Summing the recorded
+cost would bound the bill more directly, and `traces.cost_usd` is right there. But
+`estimate_cost` returns `0.0` for any model absent from `PRICING`, so pointing
+`generation_model` at an unpriced model would silently turn the cap into no cap at all —
+a control that fails open on an ordinary configuration change. A row count cannot do that.
+The cap is model-independent by construction, and the dollar figure is recovered by
+multiplying, which is the operator's job and not the guard's.
 
 ### Configuration
 
@@ -112,6 +119,24 @@ restarts.
 | retrieval | `corpus_root` | `/corpus` |
 | answer | `ask_rate_limit_per_hour` | `20` |
 | answer | `ask_daily_limit` | `500` |
+
+### Where the two limits come from
+
+`PRICING` in `telemetry.py` puts `gemini-2.0-flash` at $0.10 per million input tokens and
+$0.40 per million output. A question carrying five retrieved chunks runs roughly 4,500
+input and 250 output tokens, so about **$0.00055 each** — near enough 1,800 questions per
+dollar.
+
+At 500 per day, a fully consumed day costs about **$0.28**, or **$8.50 a month** sustained.
+That is the worst case, not the expected one; a demo of this kind sees tens of questions a
+day, so the cap sits roughly an order of magnitude above real traffic and only binds during
+abuse.
+
+The two numbers are chosen together rather than independently: **20 per hour over 24 hours
+is 480, just under the 500 daily ceiling.** One address cannot exhaust the day's budget even
+running flat out for a full day. Raising the per-IP limit past 21 breaks that property and
+lets a single scripted client lock everyone else out, so the two should be re-derived
+together if either changes.
 
 `retrieval` gains a `lifespan` it does not currently have, to hold the startup guard.
 
