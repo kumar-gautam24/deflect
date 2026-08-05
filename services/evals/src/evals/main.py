@@ -2,6 +2,7 @@ import subprocess
 from contextlib import asynccontextmanager
 from typing import Annotated
 
+from deflect_common.auth import bearer_guard
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.schemas import RunEvalsRequest
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
@@ -65,13 +66,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Deflect evals", lifespan=lifespan)
 router = APIRouter()
 
+# Built at import so an unset token aborts this module rather than leaving the most
+# expensive operation in the system reachable by anyone.
+require_operator = bearer_guard(get_settings().operator_token, "operator")
+
 
 def build_judge(request: Request) -> LLMClient:
     return request.app.state.judge_client
 
 
 def build_answer_client() -> AnswerClient:
-    return AnswerClient(get_settings().answer_url)
+    settings = get_settings()
+    return AnswerClient(settings.answer_url, settings.service_token)
 
 
 JudgeDep = Annotated[LLMClient, Depends(build_judge)]
@@ -126,7 +132,7 @@ async def health(session: SessionDep) -> dict[str, str]:
     return {"status": "ok", "database": "connected"}
 
 
-@router.post("/runs")
+@router.post("/runs", dependencies=[Depends(require_operator)])
 async def create_run(
     request: RunEvalsRequest,
     session: SessionDep,

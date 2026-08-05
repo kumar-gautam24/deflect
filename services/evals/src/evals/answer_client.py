@@ -12,20 +12,31 @@ from fastapi import HTTPException
 
 
 class AnswerClient:
-    def __init__(self, base_url: str, timeout: float = 120.0) -> None:
+    def __init__(self, base_url: str, token: str, timeout: float = 120.0) -> None:
         self._base_url = base_url.rstrip("/")
+        self._token = token
         self._timeout = timeout
 
     async def answer(self, request: AnswerRequest) -> AnswerResponse:
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(
-                    f"{self._base_url}/answer", json=request.model_dump()
+                    f"{self._base_url}/answer",
+                    json=request.model_dump(),
+                    headers={"Authorization": f"Bearer {self._token}"},
                 )
                 response.raise_for_status()
+        except httpx.HTTPStatusError as cause:
+            # Matches RetrievalClient: a rejected credential is a misconfiguration and
+            # will not heal, so it is not disguised as a transient outage.
+            if cause.response.status_code == 401:
+                raise HTTPException(
+                    status_code=500, detail="answer rejected this service's credential"
+                ) from cause
+            raise HTTPException(
+                status_code=503, detail=f"answer service unavailable: {cause}"
+            ) from cause
         except httpx.HTTPError as cause:
-            # Matches RetrievalClient: a dependency being unreachable is reported as
-            # such rather than surfacing as an opaque 500 partway through a run.
             raise HTTPException(
                 status_code=503, detail=f"answer service unavailable: {cause}"
             ) from cause

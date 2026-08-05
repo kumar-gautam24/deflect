@@ -1,7 +1,12 @@
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession
+import os
 
-from evals.db import engine
+os.environ["SERVICE_TOKEN"] = "test-service-token"
+os.environ["OPERATOR_TOKEN"] = "test-operator-token"
+
+import pytest_asyncio  # noqa: E402
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
+
+from evals.db import engine  # noqa: E402
 
 
 @pytest_asyncio.fixture
