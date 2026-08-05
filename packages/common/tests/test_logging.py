@@ -98,3 +98,73 @@ async def test_an_unmatched_path_does_not_mint_a_series_per_url():
 
     assert 'route="unmatched"' in exposition
     assert "nope-a" not in exposition
+
+
+async def test_every_request_logs_one_line_carrying_the_id():
+    """The point of the correlation id is that three services' logs reassemble into one
+    story, which needs every service to emit a line that actually carries it.
+
+    The output is captured through a real handler rather than by formatting a saved
+    record: the formatter reads the contextvar when it formats, so formatting after the
+    request would see an id that has already been reset and prove nothing. This is
+    exactly the ordering bug the middleware had -- it logged after resetting.
+    """
+    import io
+    import logging as std_logging
+
+    import httpx
+    from fastapi import FastAPI
+
+    from deflect_common.observability import RequestIdMiddleware
+
+    stream = io.StringIO()
+    handler = std_logging.StreamHandler(stream)
+    handler.setFormatter(JSONFormatter())
+    request_logger = std_logging.getLogger("deflect.request")
+    request_logger.addHandler(handler)
+    request_logger.setLevel(std_logging.INFO)
+
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+
+    @app.get("/thing")
+    async def thing() -> dict:
+        return {}
+
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            await client.get("/thing", headers={"X-Request-ID": "abc-123"})
+    finally:
+        request_logger.removeHandler(handler)
+
+    line = json.loads(stream.getvalue().strip())
+
+    assert line["request_id"] == "abc-123"
+    assert line["route"] == "/thing"
+    assert line["status"] == 200
+
+
+async def test_polled_endpoints_do_not_log_at_info(caplog):
+    """Orchestrators poll these every few seconds; at INFO they would drown every line
+    that describes real traffic."""
+    import logging as std_logging
+
+    import httpx
+    from fastapi import FastAPI
+
+    from deflect_common.observability import RequestIdMiddleware
+
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+
+    @app.get("/health")
+    async def health() -> dict:
+        return {}
+
+    transport = httpx.ASGITransport(app=app)
+    with caplog.at_level(std_logging.INFO, logger="deflect.request"):
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            await client.get("/health")
+
+    assert not [r for r in caplog.records if r.name == "deflect.request"]

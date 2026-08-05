@@ -1,5 +1,6 @@
 """Request-scoped observability shared by all three services."""
 
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -12,6 +13,12 @@ from starlette.responses import Response
 from deflect_common.logging import request_id
 
 HEADER = "X-Request-ID"
+
+logger = logging.getLogger("deflect.request")
+
+# Orchestrators poll these every few seconds and scrapers hit /metrics on a schedule.
+# At INFO they would drown every line that describes real traffic, so they drop to DEBUG.
+_POLLED = frozenset({"/health", "/ready", "/metrics"})
 
 # Labelled by route template rather than raw path: /traces/17 and /traces/18 are the same
 # operation, and one series per id would be an unbounded cardinality leak.
@@ -46,23 +53,47 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         current = request.headers.get(HEADER) or uuid.uuid4().hex
         token = request_id.set(current)
         started = time.perf_counter()
-        try:
-            response = await call_next(request)
-        except Exception:
-            # Counted before re-raising: an endpoint that only fails would otherwise be
-            # invisible in the metrics, which is when you most want to see it.
-            REQUESTS.labels(request.method, _route(request), "500").inc()
-            raise
-        finally:
-            LATENCY.labels(request.method, _route(request)).observe(
-                time.perf_counter() - started
-            )
-            request_id.reset(token)
 
-        REQUESTS.labels(request.method, _route(request), str(response.status_code)).inc()
-        # Echoed so a caller can quote it in a bug report.
-        response.headers[HEADER] = current
-        return response
+        # The reset is the outermost finally deliberately. The formatter reads the
+        # contextvar when it formats, so anything logged after a reset loses the id --
+        # which would silently strip it from the one line per request this emits, the
+        # very thing the id exists for.
+        try:
+            try:
+                response = await call_next(request)
+            except Exception:
+                # Counted and logged before re-raising: an endpoint that only ever fails
+                # would otherwise be invisible in both, which is when you most want it.
+                REQUESTS.labels(request.method, _route(request), "500").inc()
+                logger.exception("%s %s raised", request.method, _route(request))
+                raise
+            finally:
+                elapsed = time.perf_counter() - started
+                LATENCY.labels(request.method, _route(request)).observe(elapsed)
+
+            route = _route(request)
+            REQUESTS.labels(request.method, route, str(response.status_code)).inc()
+            # One line per request, in every service. The request id is attached by the
+            # formatter, so a question's path across three services shares one identifier
+            # and the logs reassemble into a single story rather than three of them.
+            logger.log(
+                logging.DEBUG if route in _POLLED else logging.INFO,
+                "%s %s -> %s",
+                request.method,
+                route,
+                response.status_code,
+                extra={
+                    "route": route,
+                    "status": response.status_code,
+                    "duration_ms": int(elapsed * 1000),
+                },
+            )
+
+            # Echoed so a caller can quote it in a bug report.
+            response.headers[HEADER] = current
+            return response
+        finally:
+            request_id.reset(token)
 
 
 def metrics_response() -> Response:
