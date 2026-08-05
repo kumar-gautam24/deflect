@@ -14,10 +14,21 @@ class Settings(BaseSettings):
     service_token: str = ""
     operator_token: str = ""
 
-    llm_provider: str = "gemini"
-    generation_model: str = "gemini-2.0-flash"
+    llm_provider: str = "groq"
+    # gpt-oss-20b generates, gpt-oss-120b judges. A judge no stronger than the generator
+    # rates its own phrasing highly, and the eval numbers stop meaning anything.
+    generation_model: str = "openai/gpt-oss-20b"
     gemini_api_key: str = ""
+    groq_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
+
+    @property
+    def provider_api_key(self) -> str:
+        """The credential for the configured provider. Passing gemini_api_key whatever
+        the provider silently sends an empty key the moment LLM_PROVIDER changes."""
+        return {"gemini": self.gemini_api_key, "groq": self.groq_api_key}.get(
+            self.llm_provider, ""
+        )
 
     # Cross-encoder logits, not similarities. Chosen from the swept curve: answers
     # 83 percent of answerable questions, passing 13 percent of unanswerable ones to

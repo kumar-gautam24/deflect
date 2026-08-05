@@ -32,7 +32,7 @@ def _make_client() -> LLMClient:
     return get_client(
         provider=settings.llm_provider,
         model=settings.generation_model,
-        api_key=settings.gemini_api_key,
+        api_key=settings.provider_api_key,
         base_url=settings.ollama_base_url,
     )
 

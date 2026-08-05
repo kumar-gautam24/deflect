@@ -6,6 +6,10 @@
 PRICING: dict[str, tuple[float, float]] = {
     "gemini-2.0-flash": (0.10, 0.40),
     "gemini-2.0-pro": (1.25, 5.00),
+    # Groq's paid per-million rates. Not zeroes: the free tier costs nothing today, but
+    # a 0.0 here would make every trace claim the answer was free.
+    "openai/gpt-oss-120b": (0.15, 0.75),
+    "openai/gpt-oss-20b": (0.10, 0.50),
 }
 
 

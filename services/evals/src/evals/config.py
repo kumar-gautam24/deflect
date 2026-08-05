@@ -21,10 +21,19 @@ class Settings(BaseSettings):
     dataset_path: Path = Path(__file__).parents[4] / "evals" / "golden.yaml"
     git_sha: str = ""
 
-    llm_provider: str = "gemini"
-    judge_model: str = "gemini-2.0-pro"
+    llm_provider: str = "groq"
+    judge_model: str = "openai/gpt-oss-120b"
     gemini_api_key: str = ""
+    groq_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
+
+    @property
+    def provider_api_key(self) -> str:
+        """The credential for the configured provider. Passing gemini_api_key whatever
+        the provider silently sends an empty key the moment LLM_PROVIDER changes."""
+        return {"gemini": self.gemini_api_key, "groq": self.groq_api_key}.get(
+            self.llm_provider, ""
+        )
 
 
 @lru_cache
