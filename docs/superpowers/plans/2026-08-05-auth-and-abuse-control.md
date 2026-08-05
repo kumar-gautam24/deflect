@@ -1913,7 +1913,35 @@ curl -fsS -X POST localhost:8001/ingest \
   -d "{\"root\": \"/corpus\", \"commit_sha\": \"$(git -C /tmp/fastapi-src rev-parse HEAD)\"}"
 ```
 
-The golden-dataset validation step gains `SERVICE_TOKEN: ci-service-token` in its env so its `/documents` call is credentialed.
+The golden-dataset validation step needs a credential for its `/documents` call, but
+**it cannot use `SERVICE_TOKEN`**: `services/evals/tests/conftest.py` assigns that variable
+before any import, so anything CI passes under that name is overwritten with the unit-test
+constant before the test reads it. The two are genuinely different credentials — one builds
+this service's own guards, the other authenticates to a *live* retrieval service — so the
+integration check gets its own variable.
+
+Change `services/evals/tests/test_dataset.py` to send it:
+
+```python
+    url = os.environ.get("RETRIEVAL_URL", "http://localhost:8001")
+    # Deliberately not SERVICE_TOKEN: conftest.py assigns that before import, so a value
+    # passed in under that name never survives to here. This is the credential of the
+    # live retrieval service being checked against, which is a different thing from the
+    # token this service builds its own guards with.
+    token = os.environ.get("CORPUS_CHECK_TOKEN", "")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{url}/documents", headers={"Authorization": f"Bearer {token}"}
+            )
+            response.raise_for_status()
+```
+
+A 401 arrives as `HTTPStatusError`, which is an `HTTPError`, so the existing skip-or-fail
+branch already handles it: the unit suite still skips without a running stack, and CI's
+`REQUIRE_CORPUS_CHECK` still turns it into a build failure.
+
+The CI step then sets `CORPUS_CHECK_TOKEN=ci-service-token` rather than `SERVICE_TOKEN`.
 
 The eval smoke step's `POST /runs` gains `-H "Authorization: Bearer ci-operator-token"`.
 
