@@ -1,12 +1,10 @@
 import logging
-import time
 from datetime import UTC, datetime
 from typing import Annotated
 
 from deflect_common.auth import bearer_guard, hash_token
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
-from deflect_common.ratelimit import SlidingWindowLimiter, client_address
 from deflect_common.schemas import LoginRequest
 from deflect_common.sessions import RedisSessionStore, SessionStore
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
@@ -19,7 +17,6 @@ from auth.config import get_settings
 from auth.db import SessionDep
 from auth.models import AdminUser
 from auth.models import Session as SessionRow
-from auth.policy import Policy
 from auth.service import AccountLocked, LoginFailed, login, logout, logout_all
 
 logger = logging.getLogger(__name__)
@@ -58,9 +55,6 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 # exits before binding a port, the same refuse-to-boot behaviour every other service has.
 _sessions = RedisSessionStore(get_settings().redis_url)
 require_service = bearer_guard(get_settings().service_token, "service")
-_login_limiter = SlidingWindowLimiter(
-    limit=Policy.LOGIN_ATTEMPTS_PER_HOUR, window_seconds=3600
-)
 
 
 def build_sessions() -> SessionStore:
@@ -121,9 +115,10 @@ async def ready(session: SessionDep) -> dict[str, str]:
 async def login_route(
     request: LoginRequest, http: Request, session: SessionDep, sessions: SessionsDep
 ) -> dict:
-    address = client_address(http, trust_forwarded=False)
-    if not _login_limiter.check(address, time.monotonic()):
-        raise HTTPException(429, "too many login attempts", headers={"Retry-After": "3600"})
+    # Not the caller's real address once every login goes through the gateway -- it is
+    # whichever hop connects to this service directly. Recorded on the session row for an
+    # operator to read, not trusted for any decision, so that mismatch does not matter here.
+    address = http.client.host if http.client else "unknown"
 
     try:
         token, row = await login(

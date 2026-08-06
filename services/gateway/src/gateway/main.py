@@ -1,13 +1,16 @@
+import time
 from typing import Annotated
 
 import httpx
 from deflect_common.auth import bearer_guard
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
+from deflect_common.ratelimit import SlidingWindowLimiter, edge_address
 from deflect_common.sessions import RedisSessionStore, SessionStore
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 
 from gateway.config import get_settings
+from gateway.policy import Policy
 from gateway.principal import allowed
 from gateway.proxy import forward
 from gateway.routes import ROUTES, Route
@@ -27,6 +30,20 @@ _settings = get_settings()
 _sessions = RedisSessionStore(_settings.redis_url)
 _client = httpx.AsyncClient()
 require_service = bearer_guard(_settings.service_token, "service")
+
+# One limiter per named allowance. Keyed by the address the edge computed, which is not
+# the address uvicorn would have reported -- see edge_address.
+_limiters = {
+    "ask": SlidingWindowLimiter(Policy.ASK_PER_HOUR, Policy.WINDOW_SECONDS),
+    "login": SlidingWindowLimiter(Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS),
+}
+
+
+def build_limiters() -> dict[str, SlidingWindowLimiter]:
+    return _limiters
+
+
+LimitersDep = Annotated[dict[str, SlidingWindowLimiter], Depends(build_limiters)]
 
 _UPSTREAMS = {
     "retrieval": _settings.retrieval_url,
@@ -60,8 +77,18 @@ def _handler_for(route: Route):
         request: Request,
         sessions: SessionsDep,
         client: ClientDep,
+        limiters: LimitersDep,
         authorization: Annotated[str | None, Header()] = None,
     ) -> Response:
+        if route.limit is not None:
+            address = edge_address(request, _settings.trusted_proxy_hops)
+            if not limiters[route.limit].check(address, time.monotonic()):
+                raise HTTPException(
+                    status_code=429,
+                    detail="too many requests from this address",
+                    headers={"Retry-After": str(Policy.WINDOW_SECONDS)},
+                )
+
         if not await allowed(
             route, authorization, sessions, _settings.service_token, _settings.operator_token
         ):
