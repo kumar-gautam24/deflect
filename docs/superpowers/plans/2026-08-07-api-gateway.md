@@ -456,9 +456,11 @@ nobody can safely change six months later.
 
 
 class Policy:
-    # Carried unchanged from the answer service, so moving the limit does not also
-    # change how much traffic an hour permits. Burst is new -- see below.
-    ASK_PER_HOUR = 20
+    # The /ask RATE is deliberately NOT here. It lives in Settings, because it is the one
+    # number an operator may want to turn down under load and a constant would mean a
+    # deploy to do it. The burst below is a design decision rather than an operational
+    # knob, so it stays a constant.
+    #
     # Five questions back to back is someone trying the demo, not abusing it. The old
     # sliding-window log allowed all twenty at once, so this is strictly smoother.
     ASK_BURST = 5
@@ -503,6 +505,10 @@ class Settings(BaseSettings):
 
     service_token: str = ""
     operator_token: str = ""
+
+    # Settings rather than a constant: this is the number an operator turns down when the
+    # provider bill starts climbing, and needing a deploy to do that defeats the point.
+    ask_rate_limit_per_hour: int = 20
 
     # How many proxies sit in front of this process. One on Render; zero locally, where
     # the fallback to the peer address is the right answer anyway.
@@ -1535,9 +1541,12 @@ from deflect_common.sessions import FakeSessionStore
 from doubles import build_upstream
 from httpx import ASGITransport, AsyncClient
 
+from gateway.config import get_settings
 from gateway.main import app as gateway_app
 from gateway.main import build_client, build_limiters, build_sessions
 from gateway.policy import Policy
+
+ASK_RATE = get_settings().ask_rate_limit_per_hour
 
 
 @pytest_asyncio.fixture
@@ -1558,7 +1567,7 @@ def _fresh_limiters():
     from deflect_common.ratelimit import SlidingWindowLimiter
 
     return {
-        "ask": SlidingWindowLimiter(Policy.ASK_PER_HOUR, Policy.WINDOW_SECONDS),
+        "ask": SlidingWindowLimiter(ASK_RATE, Policy.WINDOW_SECONDS),
         "login": SlidingWindowLimiter(Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS),
     }
 
@@ -1570,14 +1579,14 @@ async def call(app, path: str, headers=None) -> httpx.Response:
 
 
 async def test_the_allowance_is_spent_and_then_refused(app):
-    for _ in range(Policy.ASK_PER_HOUR):
+    for _ in range(ASK_RATE):
         assert (await call(app, "/ask")).status_code != 429
 
     assert (await call(app, "/ask")).status_code == 429
 
 
 async def test_a_refusal_carries_retry_after(app):
-    for _ in range(Policy.ASK_PER_HOUR):
+    for _ in range(ASK_RATE):
         await call(app, "/ask")
 
     response = await call(app, "/ask")
@@ -1588,7 +1597,7 @@ async def test_a_refusal_carries_retry_after(app):
 async def test_a_spoofed_forwarded_header_does_not_buy_a_fresh_allowance(app):
     """The regression test for edge_address. If the gateway believed the leftmost entry,
     each of these would be a new key and the limit would never bind."""
-    for i in range(Policy.ASK_PER_HOUR):
+    for i in range(ASK_RATE):
         response = await call(app, "/ask", headers={"X-Forwarded-For": f"9.9.9.{i}"})
         assert response.status_code != 429
 
@@ -1601,7 +1610,7 @@ async def test_an_unguarded_route_is_not_limited(app):
     """Only routes naming a limiter are limited. /eval-runs is public and cheap."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
-        for _ in range(Policy.ASK_PER_HOUR + 5):
+        for _ in range(ASK_RATE + 5):
             assert (await c.get("/eval-runs")).status_code != 429
 ```
 
@@ -1628,7 +1637,7 @@ Add after `require_service`:
 # One limiter per named allowance. Keyed by the address the edge computed, which is not
 # the address uvicorn would have reported -- see edge_address.
 _limiters = {
-    "ask": SlidingWindowLimiter(Policy.ASK_PER_HOUR, Policy.WINDOW_SECONDS),
+    "ask": SlidingWindowLimiter(_settings.ask_rate_limit_per_hour, Policy.WINDOW_SECONDS),
     "login": SlidingWindowLimiter(Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS),
 }
 
@@ -2025,7 +2034,9 @@ In `services/gateway/src/gateway/main.py`, replace the limiter construction:
 # policy constant names what an operator cares about -- how big a burst is tolerated --
 # and the parameter names the mechanism that delivers it, the depth of the bucket.
 _limiters: dict[str, Limiter] = {
-    "ask": InMemoryLeakyBucket(Policy.ASK_PER_HOUR, Policy.WINDOW_SECONDS, Policy.ASK_BURST),
+    "ask": InMemoryLeakyBucket(
+        _settings.ask_rate_limit_per_hour, Policy.WINDOW_SECONDS, Policy.ASK_BURST
+    ),
     "login": InMemoryLeakyBucket(
         Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS, Policy.LOGIN_BURST
     ),
@@ -2053,7 +2064,7 @@ Update the imports accordingly and delete the `SlidingWindowLimiter` import.
 
 - [ ] **Step 6: Update the gateway's limit tests**
 
-In `services/gateway/tests/test_limits.py`, change `_fresh_limiters` to build `InMemoryLeakyBucket` with the burst values as `capacity`, and change `test_the_allowance_is_spent_and_then_refused` to spend `Policy.ASK_BURST` rather than `Policy.ASK_PER_HOUR` requests. Add:
+In `services/gateway/tests/test_limits.py`, change `_fresh_limiters` to build `InMemoryLeakyBucket` with the burst values as `capacity`, and change `test_the_allowance_is_spent_and_then_refused` to spend `Policy.ASK_BURST` rather than `ASK_RATE` requests. Add:
 
 ```python
 async def test_the_advertised_wait_is_honest(app):
