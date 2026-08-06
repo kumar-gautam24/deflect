@@ -8,6 +8,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_answer"
     retrieval_url: str = "http://localhost:8001"
+    redis_url: str = "redis://localhost:6379/0"
 
     # Empty by default so a deployment that forgets them fails at import rather than
     # serving open routes. docker-compose supplies development values.

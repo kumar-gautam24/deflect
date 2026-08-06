@@ -3,14 +3,16 @@ import json
 import subprocess
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from typing import Annotated
 
-from deflect_common.auth import bearer_guard
+from deflect_common.auth import principal_guard
 from deflect_common.jobs import EVAL_ITEM_STREAM, JobQueue, RedisJobQueue
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
 from deflect_common.schemas import RunEvalsRequest
+from deflect_common.sessions import RedisSessionStore, SessionStore
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select, text
@@ -83,14 +85,33 @@ configure_logging()
 app.add_middleware(RequestIdMiddleware)
 router = APIRouter()
 
+_settings = get_settings()
+
+
+# Built once and cached, so a request does not open a Redis client per call, but exposed
+# as a dependency so tests can replace it. Passing the store itself to principal_guard
+# would close over it and make dependency_overrides silently ineffective.
+@lru_cache
+def build_sessions() -> SessionStore:
+    return RedisSessionStore(get_settings().redis_url)
+
+
 # Built at import so an unset token aborts this module rather than leaving the most
 # expensive operation in the system reachable by anyone.
-require_operator = bearer_guard(get_settings().operator_token, "operator")
+require_operator = principal_guard(
+    "operator", _settings.service_token, _settings.operator_token, build_sessions
+)
 
 # Guards /metrics, and its construction aborts the import when SERVICE_TOKEN is unset, so
 # a deploy that forgot the credential refuses to start rather than failing partway through
 # an eval run.
-require_service = bearer_guard(get_settings().service_token, "service")
+require_service = principal_guard(
+    "service", _settings.service_token, _settings.operator_token, build_sessions
+)
+
+require_viewer = principal_guard(
+    "viewer", _settings.service_token, _settings.operator_token, build_sessions
+)
 
 
 def build_judge(request: Request) -> LLMClient:

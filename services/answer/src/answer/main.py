@@ -4,9 +4,10 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Annotated
 
-from deflect_common.auth import bearer_guard, token_matches
+from deflect_common.auth import principal_guard, token_matches
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
@@ -16,6 +17,7 @@ from deflect_common.ratelimit import (
     seconds_until_utc_midnight,
 )
 from deflect_common.schemas import AnswerRequest, AnswerResponse
+from deflect_common.sessions import RedisSessionStore, SessionStore
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -66,8 +68,26 @@ router = APIRouter()
 
 # Built at import, not in the lifespan: an unset token aborts this module and uvicorn
 # exits before binding a port. Module-level names are what dependency_overrides keys on.
-require_service = bearer_guard(get_settings().service_token, "service")
-require_operator = bearer_guard(get_settings().operator_token, "operator")
+_settings = get_settings()
+
+
+# Built once and cached, so a request does not open a Redis client per call, but exposed
+# as a dependency so tests can replace it. Passing the store itself to principal_guard
+# would close over it and make dependency_overrides silently ineffective.
+@lru_cache
+def build_sessions() -> SessionStore:
+    return RedisSessionStore(get_settings().redis_url)
+
+
+require_service = principal_guard(
+    "service", _settings.service_token, _settings.operator_token, build_sessions
+)
+require_operator = principal_guard(
+    "operator", _settings.service_token, _settings.operator_token, build_sessions
+)
+require_viewer = principal_guard(
+    "viewer", _settings.service_token, _settings.operator_token, build_sessions
+)
 
 # One limiter for the process. Per-process state means each instance counts separately
 # and a redeploy grants a fresh allowance; see ratelimit.py for why that is accepted.
@@ -208,13 +228,13 @@ async def ask(
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-@router.get("/traces", dependencies=[Depends(require_operator)])
+@router.get("/traces", dependencies=[Depends(require_viewer)])
 async def list_traces(session: SessionDep) -> list[dict]:
     statement = select(Trace).order_by(Trace.id.desc()).limit(100)
     return [_serialize(trace) for trace in (await session.execute(statement)).scalars()]
 
 
-@router.get("/traces/{trace_id}", dependencies=[Depends(require_operator)])
+@router.get("/traces/{trace_id}", dependencies=[Depends(require_viewer)])
 async def get_trace(trace_id: int, session: SessionDep) -> dict:
     trace = await session.get(Trace, trace_id)
     if trace is None:

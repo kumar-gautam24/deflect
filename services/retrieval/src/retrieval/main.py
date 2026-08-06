@@ -1,10 +1,11 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from deflect_common.auth import bearer_guard
+from deflect_common.auth import principal_guard
 from deflect_common.jobs import INGEST_STREAM, JobQueue, RedisJobQueue
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
@@ -13,6 +14,7 @@ from deflect_common.schemas import (
     SearchRequest,
     SearchResponse,
 )
+from deflect_common.sessions import RedisSessionStore, SessionStore
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
@@ -38,8 +40,25 @@ app.add_middleware(RequestIdMiddleware)
 # exits before binding a port. Module-level names are also what dependency_overrides
 # keys on when a test bypasses a guard.
 _settings = get_settings()
-require_service = bearer_guard(_settings.service_token, "service")
-require_operator = bearer_guard(_settings.operator_token, "operator")
+
+
+# Built once and cached, so a request does not open a Redis client per call, but exposed
+# as a dependency so tests can replace it. Passing the store itself to principal_guard
+# would close over it and make dependency_overrides silently ineffective.
+@lru_cache
+def build_sessions() -> SessionStore:
+    return RedisSessionStore(get_settings().redis_url)
+
+
+require_service = principal_guard(
+    "service", _settings.service_token, _settings.operator_token, build_sessions
+)
+require_operator = principal_guard(
+    "operator", _settings.service_token, _settings.operator_token, build_sessions
+)
+require_viewer = principal_guard(
+    "viewer", _settings.service_token, _settings.operator_token, build_sessions
+)
 
 
 def build_queue() -> JobQueue:
