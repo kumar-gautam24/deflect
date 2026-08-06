@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from deflect_common.jobs import EVAL_ITEM_STREAM, Delivery, JobQueue, RedisJobQueue
 from deflect_common.llm.base import get_client
 from deflect_common.schemas import AnswerResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from evals.answer_client import AnswerClient
@@ -98,9 +99,22 @@ async def process_one(
     job.status = "done"
     job.error = None
 
-    await _record_provenance(session, job.run_id, outcome)
-    await finalise_if_complete(session, job.run_id)
-    await session.commit()
+    try:
+        await _record_provenance(session, job.run_id, outcome)
+        await finalise_if_complete(session, job.run_id)
+        await session.commit()
+    except IntegrityError:
+        # Another worker already scored this item. Reclaiming cannot distinguish a dead
+        # worker from a slow one, so an item taking longer than the visibility timeout is
+        # handed to a second worker while the first is still running it -- and both then
+        # insert against the unique constraint on (run_id, item_id).
+        #
+        # The constraint is what keeps the score from being counted twice. Catching it
+        # here is what keeps that from killing the worker process: unhandled, it
+        # propagates out of the run loop and the container dies with a queue still full.
+        await session.rollback()
+        logger.info("eval item %s was already scored by another worker", job.item_id)
+
     await queue.acknowledge(EVAL_ITEM_STREAM, delivery.message_id)
 
 

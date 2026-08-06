@@ -1,4 +1,7 @@
+import asyncio
+import json
 import subprocess
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -9,7 +12,8 @@ from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
 from deflect_common.schemas import RunEvalsRequest
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
-from sqlalchemy import select, text
+from fastapi.responses import StreamingResponse
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from evals.answer_client import AnswerClient
@@ -107,9 +111,27 @@ AnswerDep = Annotated[AnswerClient, Depends(build_answer_client)]
 QueueDep = Annotated[JobQueue, Depends(build_queue)]
 
 
+async def _progress(session: AsyncSession, run_id: int, items_total: int) -> dict:
+    """How many of a run's items are finished.
+
+    Failed items count as finished. Otherwise progress would stick below 100% on a run
+    that is genuinely over, which reads as a stall.
+    """
+    finished = (
+        await session.execute(
+            select(func.count())
+            .select_from(EvalItemJob)
+            .where(EvalItemJob.run_id == run_id, EvalItemJob.status.in_(("done", "failed")))
+        )
+    ).scalar_one()
+    return {"finished": finished, "total": items_total}
+
+
 def _run_summary(run: EvalRun) -> dict:
     return {
         "id": run.id,
+        "status": run.status,
+        "items_total": run.items_total,
         "git_sha": run.git_sha,
         "prompt_version": run.prompt_version,
         "judge_version": run.judge_version,
@@ -253,7 +275,49 @@ async def diff_runs(base: int, head: int, session: SessionDep) -> dict:
 async def get_run(run_id: int, session: SessionDep) -> dict:
     run = await _load_run(session, run_id)
     results = await _results_for(session, run_id)
-    return _run_summary(run) | {"results": [_result_row(r) for r in results]}
+    return _run_summary(run) | {
+        "progress": await _progress(session, run_id, run.items_total),
+        "results": [_result_row(r) for r in results],
+    }
+
+
+@router.get("/eval-runs/{run_id}/events")
+async def run_events(run_id: int, http: Request, session: SessionDep) -> StreamingResponse:
+    """Progress as SSE, closing when the run finalises.
+
+    Public, like the run itself: a run's progress is the same class of information as its
+    results, which the dashboard already shows to anyone. Watching an eval run is the most
+    interesting thing this project does, and a credential would hide the demo.
+    """
+    # Resolved before streaming, so an unknown id is a 404 rather than a 200 carrying an
+    # error frame -- the same contract GET /eval-runs/{run_id} already has.
+    if await session.get(EvalRun, run_id) is None:
+        raise HTTPException(status_code=404, detail=f"eval run {run_id} not found")
+
+    async def stream() -> AsyncIterator[str]:
+        while True:
+            # An abandoned stream must not hold a database session for the whole life of
+            # a run, which is about two hours.
+            if await http.is_disconnected():
+                return
+
+            run = await session.get(EvalRun, run_id)
+            if run is None:
+                return
+            # The identity map would otherwise hand back the row as it looked on the
+            # first pass, and the stream would report "running" forever.
+            await session.refresh(run)
+
+            frame = {
+                "status": run.status,
+                "progress": await _progress(session, run_id, run.items_total),
+            }
+            yield f"data: {json.dumps(frame)}\n\n"
+            if run.status != "running":
+                return
+            await asyncio.sleep(2)
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 
 @router.get("/metrics", dependencies=[Depends(require_service)])

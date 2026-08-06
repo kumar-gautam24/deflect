@@ -141,3 +141,24 @@ async def test_a_message_whose_job_row_is_missing_is_acknowledged(session):
     await process_one(session, queue, claimed, score)
 
     assert await queue.pending_count(EVAL_ITEM_STREAM) == 0
+
+
+async def test_a_duplicate_score_does_not_kill_the_worker(session):
+    """Reclaiming cannot tell a dead worker from a slow one, so a long item gets handed
+    to a second worker while the first still holds it. Both insert, the unique constraint
+    stops the double count -- and unhandled, that IntegrityError would propagate out of
+    the run loop and kill the container with a queue still full."""
+    run, job = await _run_with_one_item(session)
+    queue = FakeJobQueue()
+    claimed = await _claimed(queue, job.id)
+
+    # A row already exists for this item, as the other worker would have written.
+    duplicate = _row("q1")
+    duplicate.run_id = run.id
+    session.add(duplicate)
+    await session.flush()
+    job.status = "queued"
+
+    await process_one(session, queue, claimed, _score)
+
+    assert await queue.pending_count(EVAL_ITEM_STREAM) == 0
