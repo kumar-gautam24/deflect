@@ -1,20 +1,13 @@
 """Executes the golden dataset against the live answer service and persists the run."""
 
-import logging
-
-import httpx
 from deflect_common.llm.base import LLMClient
 from deflect_common.schemas import AnswerRequest, AnswerResponse, SearchRequest
-from fastapi import HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from evals.answer_client import AnswerClient
 from evals.dataset import GoldenItem
-from evals.judge import JUDGE_VERSION, JudgeScores, judge_answer
+from evals.judge import judge_answer
 from evals.metrics import hit_at_k, mrr
-from evals.models import EvalResult, EvalRun
-
-logger = logging.getLogger(__name__)
+from evals.models import EvalResult
 
 
 def _mean(values: list[float]) -> float:
@@ -43,85 +36,49 @@ def _aggregate(results: list[EvalResult]) -> dict:
     }
 
 
-async def run_evals(
-    session: AsyncSession,
-    items: list[GoldenItem],
+async def score_item(
+    item: GoldenItem,
     answer_client: AnswerClient,
     judge_client: LLMClient,
     search: SearchRequest | None,
-    git_sha: str,
-) -> EvalRun:
-    if not items:
-        raise ValueError("cannot run evals over an empty dataset")
+) -> tuple[EvalResult, AnswerResponse]:
+    """Answer and score one item, returning an unattached row and the raw outcome.
 
-    # Every item is scored before the run row is built, so the run is written once
-    # with its real prompt version, model, and metrics rather than being inserted
-    # empty and patched as the loop proceeds.
-    scored: list[tuple[GoldenItem, AnswerResponse, JudgeScores | None]] = []
-    for item in items:
-        request = AnswerRequest(
-            question=item.question,
-            search=search.model_copy(update={"query": item.question}) if search else None,
-        )
-        # One failed item must not discard the run. A full pass takes roughly 110
-        # minutes against a free-tier quota, so aborting at item 47 throws away 45
-        # minutes of work and every score already computed. The item is skipped and the
-        # run is scored on what succeeded; a run that lost items is visible because
-        # item_count is lower than the dataset.
-        try:
-            outcome = await answer_client.answer(request)
+    It takes no session on purpose: the worker owns persistence, and a function that both
+    scored and wrote could not be retried without deciding what to do about a
+    half-written result.
 
-            # Judging a refusal wastes tokens: there is no answer to score, and the
-            # escalation metrics already capture whether refusing was correct.
-            scores = (
-                None
-                if outcome.escalated
-                else await judge_answer(judge_client, item, outcome.answer, outcome.hits)
-            )
-        except (httpx.HTTPError, HTTPException) as cause:
-            logger.warning("eval item %s failed and was skipped: %s", item.id, cause)
-            continue
-
-        scored.append((item, outcome, scores))
-
-    _, first, _ = scored[0]
-    run = EvalRun(
-        git_sha=git_sha,
-        prompt_version=first.prompt_version,
-        judge_version=JUDGE_VERSION,
-        model=first.model,
-        retrieval_config=search.model_dump() if search else {},
-        thresholds={"min_top_score": first.min_top_score, "min_margin": first.min_margin},
-        # What was actually scored, not what was asked for. A run that lost items to
-        # provider failures must not claim to have covered the whole dataset.
-        item_count=len(scored),
-        metrics={},
+    The outcome comes back alongside the row because a run's provenance -- the prompt
+    version, the model, the gate thresholds actually in force -- is only knowable once
+    something has answered, and the run row is created before that.
+    """
+    request = AnswerRequest(
+        question=item.question,
+        search=search.model_copy(update={"query": item.question}) if search else None,
     )
-    session.add(run)
-    await session.flush()
+    outcome = await answer_client.answer(request)
 
-    results = []
-    for item, outcome, scores in scored:
-        sources = [hit.source_path for hit in outcome.hits]
-        results.append(
-            EvalResult(
-                run_id=run.id,
-                item_id=item.id,
-                question=item.question,
-                answer=outcome.answer,
-                escalated=outcome.escalated,
-                expected_escalate=item.should_escalate,
-                retrieved_sources=sources,
-                hit_at_5=hit_at_k(sources, item.expected_sources, k=5),
-                mrr=mrr(sources, item.expected_sources),
-                faithfulness=scores.faithfulness if scores else None,
-                answer_relevance=scores.answer_relevance if scores else None,
-                context_relevance=scores.context_relevance if scores else None,
-                rationale=scores.rationale if scores else None,
-            )
-        )
+    # Judging a refusal wastes tokens: there is no answer to score, and the escalation
+    # metrics already capture whether refusing was correct.
+    scores = (
+        None
+        if outcome.escalated
+        else await judge_answer(judge_client, item, outcome.answer, outcome.hits)
+    )
 
-    session.add_all(results)
-    run.metrics = _aggregate(results)
-    await session.flush()
-    return run
+    sources = [hit.source_path for hit in outcome.hits]
+    result = EvalResult(
+        item_id=item.id,
+        question=item.question,
+        answer=outcome.answer,
+        escalated=outcome.escalated,
+        expected_escalate=item.should_escalate,
+        retrieved_sources=sources,
+        hit_at_5=hit_at_k(sources, item.expected_sources, k=5),
+        mrr=mrr(sources, item.expected_sources),
+        faithfulness=scores.faithfulness if scores else None,
+        answer_relevance=scores.answer_relevance if scores else None,
+        context_relevance=scores.context_relevance if scores else None,
+        rationale=scores.rationale if scores else None,
+    )
+    return result, outcome

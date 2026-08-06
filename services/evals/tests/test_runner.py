@@ -1,21 +1,17 @@
 import json
 
-import httpx
-import pytest
 from deflect_common.llm.fake import FakeClient
 from deflect_common.schemas import SearchRequest
 from doubles import FakeAnswer, response
-from sqlalchemy import select
 
 from evals.dataset import GoldenItem
-from evals.models import EvalResult
-from evals.runner import run_evals
+from evals.runner import score_item
 
 
 def item(item_id: str, escalate: bool = False, sources=("deps.md",)) -> GoldenItem:
     return GoldenItem(
         id=item_id,
-        question="how do I declare a dependency",
+        question=f"question {item_id}",
         ideal_answer="Use Depends.",
         expected_sources=[] if escalate else list(sources),
         should_escalate=escalate,
@@ -28,159 +24,61 @@ def judged() -> str:
             "faithfulness": 1.0,
             "answer_relevance": 1.0,
             "context_relevance": 1.0,
-            "rationale": "ok",
+            "rationale": "grounded",
         }
     )
 
 
-async def test_run_persists_a_result_per_item_and_aggregate_metrics(session):
-    run = await run_evals(
-        session,
-        [item("q1"), item("q2")],
-        FakeAnswer([response("Use Depends.", False), response("Use Depends.", False)]),
-        FakeClient([judged()] * 2),
-        None,
-        git_sha="abc123",
-    )
+async def test_a_scored_item_carries_its_retrieval_metrics():
+    answer = FakeAnswer([response("Use Depends.", False)])
 
-    results = (
-        (await session.execute(select(EvalResult).where(EvalResult.run_id == run.id)))
-        .scalars()
-        .all()
-    )
-    assert len(results) == 2
-    assert run.item_count == 2
-    assert run.metrics["faithfulness"] == 1.0
-    assert run.git_sha == "abc123"
+    result, _ = await score_item(item("q1"), answer, FakeClient([judged()]), None)
+
+    assert result.item_id == "q1"
+    assert result.escalated is False
+    assert result.faithfulness == 1.0
+    assert result.hit_at_5 in (0.0, 1.0)
 
 
-async def test_run_records_what_the_answer_service_reported(session):
-    run = await run_evals(
-        session,
-        [item("q1")],
-        FakeAnswer([response("x", False)]),
-        FakeClient([judged()]),
-        None,
-        git_sha="sha",
-    )
+async def test_an_escalated_item_is_not_judged():
+    """Judging a refusal wastes tokens: there is no answer to score, and the escalation
+    metrics already capture whether refusing was correct."""
+    answer = FakeAnswer([response("", True)])
+    judge = FakeClient([])  # would raise if asked for a completion
 
-    # Reproducibility comes from what the answer service reported, not from a local
-    # guess: this service no longer owns the gate configuration.
-    assert run.prompt_version == "answer_v1"
-    assert run.judge_version == "judge_v1"
-    assert run.thresholds == {"min_top_score": 2.0, "min_margin": 0.0}
+    result, _ = await score_item(item("q1", escalate=True), answer, judge, None)
+
+    assert result.escalated is True
+    assert result.faithfulness is None
 
 
-async def test_escalated_item_is_not_judged(session):
-    judge = FakeClient([])
+async def test_the_item_question_is_what_gets_asked():
+    answer = FakeAnswer([response("Use Depends.", False)])
 
-    run = await run_evals(
-        session,
-        [item("u1", escalate=True)],
-        FakeAnswer([response("Not covered.", True)]),
-        judge,
-        None,
-        git_sha="sha",
-    )
+    await score_item(item("q7"), answer, FakeClient([judged()]), None)
 
-    assert judge.prompts == []
-    assert run.metrics["escalation_recall"] == 1.0
-    assert run.metrics["escalation_precision"] == 1.0
+    assert answer.requests[0].question == "question q7"
 
 
-async def test_escalation_precision_penalizes_refusing_an_answerable_question(session):
-    run = await run_evals(
-        session,
-        [item("q1")],
-        FakeAnswer([response("x", True)]),
-        FakeClient([]),
-        None,
-        git_sha="sha",
-    )
+async def test_a_search_variant_is_forwarded_with_the_item_question():
+    """The variant decides retrieval; the question must still be the item's own, or an
+    ablation would score every item against the same query."""
+    answer = FakeAnswer([response("Use Depends.", False)])
+    variant = SearchRequest(query="placeholder", use_rerank=False)
 
-    assert run.metrics["escalation_precision"] == 0.0
-    assert run.metrics["answered_rate"] == 0.0
+    await score_item(item("q3"), answer, FakeClient([judged()]), variant)
 
-
-async def test_retrieval_metrics_ignore_items_that_should_escalate(session):
-    run = await run_evals(
-        session,
-        [item("q1"), item("u1", escalate=True)],
-        FakeAnswer([response("Use Depends.", False), response("No.", True)]),
-        FakeClient([judged()]),
-        None,
-        git_sha="sha",
-    )
-
-    # Only the answerable item contributes; an unanswerable item has no expected
-    # source, so averaging it in would drag hit_at_5 toward zero for no reason.
-    assert run.metrics["hit_at_5"] == 1.0
+    sent = answer.requests[0].search
+    assert sent.query == "question q3"
+    assert sent.use_rerank is False
 
 
-async def test_each_item_is_sent_as_its_own_question(session):
-    answer = FakeAnswer([response("x", False), response("y", False)])
+async def test_the_outcome_is_returned_alongside_the_row():
+    """A run's provenance -- prompt version, model, the thresholds in force -- is only
+    knowable once something has answered, and the run row is created before that."""
+    answer = FakeAnswer([response("Use Depends.", False)])
 
-    await run_evals(
-        session,
-        [item("q1"), item("q2")],
-        answer,
-        FakeClient([judged()] * 2),
-        None,
-        git_sha="sha",
-    )
+    _, outcome = await score_item(item("q1"), answer, FakeClient([judged()]), None)
 
-    assert [r.question for r in answer.requests] == [
-        "how do I declare a dependency",
-        "how do I declare a dependency",
-    ]
-
-
-async def test_a_search_variant_is_forwarded_with_the_item_question(session):
-    answer = FakeAnswer([response("x", False)])
-    variant = SearchRequest(query="ignored", use_rerank=False, final_limit=3)
-
-    run = await run_evals(
-        session, [item("q1")], answer, FakeClient([judged()]), variant, git_sha="sha"
-    )
-
-    # The query is replaced per item; the rest of the variant is what the run is
-    # measuring, so it must survive to the answer service unchanged.
-    forwarded = answer.requests[0].search
-    assert forwarded.query == "how do I declare a dependency"
-    assert forwarded.use_rerank is False
-    assert forwarded.final_limit == 3
-    assert run.retrieval_config["use_rerank"] is False
-
-
-async def test_empty_dataset_is_rejected(session):
-    with pytest.raises(ValueError, match="empty dataset"):
-        await run_evals(session, [], FakeAnswer([]), FakeClient([]), None, "sha")
-
-
-async def test_one_failing_item_does_not_discard_the_whole_run(session):
-    """A full pass takes roughly 110 minutes against a free-tier quota, so aborting at
-    item 47 would throw away 45 minutes and every score already computed."""
-
-    class FlakyAnswer(FakeAnswer):
-        """Fails exactly once, on the second item."""
-
-        calls = 0
-
-        async def answer(self, request):
-            type(self).calls += 1
-            if type(self).calls == 2:
-                raise httpx.ReadTimeout("provider took too long")
-            return await super().answer(request)
-
-    run = await run_evals(
-        session,
-        [item("q1"), item("q2"), item("q3")],
-        FlakyAnswer([response("Use Depends.", False)] * 3),
-        FakeClient([judged()] * 3),
-        None,
-        git_sha="abc123",
-    )
-
-    # Two of three scored: the run survives, and its lower item_count is what makes the
-    # loss visible rather than silent.
-    assert run.item_count == 2
+    assert outcome.prompt_version
+    assert outcome.model

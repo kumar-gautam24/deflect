@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 from deflect_common.auth import bearer_guard
+from deflect_common.jobs import EVAL_ITEM_STREAM, JobQueue, RedisJobQueue
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
@@ -15,8 +16,8 @@ from evals.answer_client import AnswerClient
 from evals.config import get_settings
 from evals.dataset import GoldenItem, load_dataset
 from evals.db import SessionDep
-from evals.models import EvalResult, EvalRun
-from evals.runner import run_evals
+from evals.judge import JUDGE_VERSION
+from evals.models import EvalItemJob, EvalResult, EvalRun
 
 
 def _git_sha() -> str:
@@ -92,6 +93,10 @@ def build_judge(request: Request) -> LLMClient:
     return request.app.state.judge_client
 
 
+def build_queue() -> JobQueue:
+    return RedisJobQueue(get_settings().redis_url)
+
+
 def build_answer_client() -> AnswerClient:
     settings = get_settings()
     return AnswerClient(settings.answer_url, settings.service_token)
@@ -99,6 +104,7 @@ def build_answer_client() -> AnswerClient:
 
 JudgeDep = Annotated[LLMClient, Depends(build_judge)]
 AnswerDep = Annotated[AnswerClient, Depends(build_answer_client)]
+QueueDep = Annotated[JobQueue, Depends(build_queue)]
 
 
 def _run_summary(run: EvalRun) -> dict:
@@ -164,28 +170,49 @@ async def ready(session: SessionDep) -> dict[str, str]:
     return {"status": "ok", "database": "connected"}
 
 
-@router.post("/runs", dependencies=[Depends(require_operator)])
-async def create_run(
-    request: RunEvalsRequest,
-    session: SessionDep,
-    judge: JudgeDep,
-    answer: AnswerDep,
-) -> dict:
+@router.post("/runs", status_code=202, dependencies=[Depends(require_operator)])
+async def create_run(request: RunEvalsRequest, session: SessionDep, queue: QueueDep) -> dict:
+    """Accept the run and return its id.
+
+    This used to execute eighty items inline -- roughly two hours against a free-tier
+    quota, held open by one HTTP request -- so a client timeout or a container restart
+    destroyed the whole run.
+
+    fail_under is no longer honoured here: nothing has been scored yet, so there is no
+    faithfulness to compare. CI polls the run and applies its own threshold instead.
+    """
     items = _smoke_subset(load_dataset(get_settings().dataset_path), request.limit)
-    git_sha = _git_sha()
+    if not items:
+        raise HTTPException(status_code=422, detail="cannot run evals over an empty dataset")
 
-    run = await run_evals(session, items, answer, judge, request.search, git_sha)
+    # prompt_version, model and thresholds are filled at finalisation: they describe what
+    # actually answered, and nothing has answered yet.
+    run = EvalRun(
+        git_sha=_git_sha(),
+        prompt_version="",
+        judge_version=JUDGE_VERSION,
+        model=get_settings().judge_model,
+        retrieval_config=(request.search.model_dump() if request.search else {}),
+        thresholds={},
+        item_count=0,
+        metrics={},
+        items_total=len(items),
+        status="running",
+    )
+    session.add(run)
+    await session.flush()
+
+    jobs = [EvalItemJob(run_id=run.id, item_id=item.id) for item in items]
+    session.add_all(jobs)
+    await session.flush()
+
+    # Rows first, then messages, all in one transaction: a failed enqueue rolls the run
+    # back rather than leaving items no worker will ever be told about.
+    for job in jobs:
+        await queue.enqueue(EVAL_ITEM_STREAM, job.id)
+
     await session.commit()
-
-    if request.fail_under is not None and run.metrics["faithfulness"] < request.fail_under:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"faithfulness {run.metrics['faithfulness']:.3f} "
-                f"below threshold {request.fail_under}"
-            ),
-        )
-    return _run_summary(run)
+    return {"run_id": run.id}
 
 
 @router.get("/eval-runs")
