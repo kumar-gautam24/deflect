@@ -10,6 +10,8 @@ services:
     # not merely whether its process exists.
     healthCheckPath: /ready
     envVars:
+      - key: REDIS_URL
+        sync: false
       - key: DATABASE_URL
         sync: false
       # Both services on a call must carry the same SERVICE_TOKEN, so these are set
@@ -63,6 +65,8 @@ services:
     # not merely whether its process exists.
     healthCheckPath: /ready
     envVars:
+      - key: REDIS_URL
+        sync: false
       - key: DATABASE_URL
         sync: false
       - key: GEMINI_API_KEY
@@ -78,4 +82,44 @@ services:
       - key: OPERATOR_TOKEN
         sync: false
       - key: ENV
+        sync: false
+
+  # Workers: the same images, a different command. type: worker means no port and no
+  # health check -- they consume a queue rather than serving requests.
+  - type: worker
+    name: deflect-retrieval-worker
+    runtime: docker
+    dockerfilePath: ./services/retrieval/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m retrieval.worker
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: SERVICE_TOKEN
+        sync: false
+      - key: OPERATOR_TOKEN
+        sync: false
+      - key: CORPUS_ROOT
+        sync: false
+
+  - type: worker
+    name: deflect-evals-worker
+    runtime: docker
+    dockerfilePath: ./services/evals/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m evals.worker
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ANSWER_URL
+        sync: false
+      - key: SERVICE_TOKEN
+        sync: false
+      - key: OPERATOR_TOKEN
         sync: false

@@ -224,9 +224,24 @@ that was previously impossible. There is no transaction across services, which i
 feasible only because nothing here needs one. And `packages/common` is a coupling
 point: a breaking change there is a coordinated deploy.
 
-**What it did not need.** No service mesh, no Kubernetes, no message broker, no
-distributed tracing backend. Adding infrastructure the system has no use for would
-obscure the parts worth understanding.
+**What it needed, and why.** A message broker — eventually, and not at first. Ingest and
+eval runs were synchronous: a full eval run is about two hours against a free-tier quota,
+held open by one HTTP request. During this project's own development that run was
+destroyed twice, once by a container rebuild and once by a client timeout, losing about
+forty-five minutes each time. Redis Streams now carries both as jobs.
+
+Redis carries work and Postgres carries truth: every piece of job state lives in the
+owning service's own database, so job status still answers when the broker is down and
+there is still no shared table between services.
+
+Parallel workers do **not** make a run faster — the provider's rate limit is the ceiling,
+not worker count. What the queue buys is retry granularity, visible progress, and survival
+across a restart.
+
+**What it still does not need.** No service mesh, no Kubernetes, no distributed tracing
+backend. Adding infrastructure the system has no use for would obscure the parts worth
+understanding — and note that the broker earned its place only after the synchronous
+version had failed twice in practice, not because a diagram looked better with one.
 
 ## Security
 
@@ -237,12 +252,13 @@ obscure the parts worth understanding.
 | all three | `/docs`, `/redoc`, `/openapi.json` | public in development, absent when `ENV=production` |
 | retrieval | `GET /documents` | service |
 | retrieval | `POST /search` | service |
-| retrieval | `POST /ingest` | operator, plus path confinement |
+| retrieval | `POST /ingest` | operator, plus path confinement — returns `202` |
+| retrieval | `GET /jobs/{job_id}`, `/jobs/{job_id}/events` | operator |
 | answer | `POST /ask` | public, rate limited |
 | answer | `POST /answer` | service |
 | answer | `GET /traces`, `GET /traces/{id}` | operator |
-| evals | `POST /runs` | operator |
-| evals | `GET /eval-runs`, `/eval-runs/diff`, `/eval-runs/{id}` | public |
+| evals | `POST /runs` | operator — returns `202` |
+| evals | `GET /eval-runs`, `/eval-runs/diff`, `/eval-runs/{id}`, `/eval-runs/{id}/events` | public |
 
 Two static bearer tokens carried in the environment, enforced by one dependency in
 `packages/common`. An API-key table with per-caller revocation would have needed either a

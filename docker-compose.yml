@@ -19,12 +19,23 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./scripts/create-databases.sql:/docker-entrypoint-initdb.d/10-databases.sql:ro
 
+  redis:
+    image: redis:7-alpine
+    ports: ["${REDIS_PORT:-6379}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+    volumes:
+      - redisdata:/data
+
   retrieval:
     build:
       context: .
       dockerfile: services/retrieval/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_retrieval
+      REDIS_URL: redis://redis:6379/0
       ENV: ${ENV:-development}
       SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
       OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
@@ -61,6 +72,7 @@ services:
       dockerfile: services/evals/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_evals
+      REDIS_URL: redis://redis:6379/0
       ANSWER_URL: http://answer:8002
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -77,5 +89,45 @@ services:
       answer:
         condition: service_started
 
+
+  # Workers run the images already built, with a different command. Each needs its own
+  # service's database and dependencies -- the ingest worker embeds, the eval worker
+  # judges -- so a shared generic worker would have to carry both.
+  retrieval-worker:
+    build:
+      context: .
+      dockerfile: services/retrieval/Dockerfile
+    command: ["python", "-m", "retrieval.worker"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_retrieval
+      REDIS_URL: redis://redis:6379/0
+      CORPUS_ROOT: /corpus
+      ENV: ${ENV:-development}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  evals-worker:
+    build:
+      context: .
+      dockerfile: services/evals/Dockerfile
+    command: ["python", "-m", "evals.worker"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_evals
+      REDIS_URL: redis://redis:6379/0
+      ANSWER_URL: http://answer:8002
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      DATASET_PATH: /app/evals/golden.yaml
+      ENV: ${ENV:-development}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
 volumes:
   pgdata:
+  redisdata:
