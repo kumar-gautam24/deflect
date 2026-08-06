@@ -1,20 +1,97 @@
 # Deflect
 
-Answers FastAPI support questions from the official documentation with citations, and
-escalates to a human when its own confidence signals say it should not guess.
+**A support assistant for FastAPI's documentation that answers with citations — or admits
+it doesn't know.**
 
-Three FastAPI services with a database each, a Next.js frontend, Postgres with
-pgvector, Gemini for generation and judging, and local models for embedding and
-reranking.
+Ask it something the docs cover, and it answers and shows you exactly which passages it
+used:
 
-## Why the refusal matters
+```
+$ curl -X POST localhost:8002/ask -d '{"question": "How do I declare a dependency?"}'
 
-A support assistant that answers everything is worse than one that answers less. A
-confidently wrong answer costs a support team more than no answer, because someone has
-to discover it and undo it. Deflect measures both rates rather than optimising one.
+  You declare a dependency by writing a function and passing it to Depends() as a
+  default value in your path operation. FastAPI resolves it before your handler runs.
 
-The interesting part of this project is not the retrieval pipeline. It is the eval
-harness that tells you when the pipeline is wrong, and it gates CI.
+  Sources:
+    tutorial/dependencies/index.md      Dependencies > First steps
+    tutorial/dependencies/classes.md    Classes as Dependencies
+    advanced/security/oauth2-scopes.md  Declaring scopes in dependencies
+```
+
+Ask it something the docs *don't* cover, and it refuses rather than inventing an answer:
+
+```
+$ curl -X POST localhost:8002/ask -d '{"question": "How much does FastAPI cost per seat?"}'
+
+  escalated: true
+  reason:    low_retrieval_score
+
+  No passage in the documentation answers this. Handing off to a human.
+```
+
+Both responses are shown rendered for readability — the endpoint actually streams
+server-sent events, and the refusal reason is one of `no_results`, `low_retrieval_score`,
+`ambiguous_retrieval` or `ungrounded_answer`, so a trace records *which* check refused.
+
+That second behaviour is the whole point.
+
+## The problem it solves
+
+**A confidently wrong answer costs more than no answer.** If a support bot invents
+something, a human has to notice the error, undo whatever the user did because of it, and
+rebuild the user's trust. Saying "I don't know" is cheaper than any of that.
+
+Most retrieval systems optimise one number: how often they answer correctly. Deflect
+tracks two, in tension:
+
+- **wrongly answered** — it guessed when it should have deferred
+- **wrongly refused** — it deferred when it had the material to answer
+
+Tuning either one alone is easy and useless. A system that refuses everything never lies;
+a system that answers everything is never unhelpful. The work is in choosing where to sit
+between them, deliberately, and being able to prove where you sat.
+
+Which is why the honest summary of this project is: **the interesting part is not the
+retrieval pipeline, it's the eval harness that tells you when the pipeline is wrong** — and
+it gates CI.
+
+## How it works
+
+**1. Ingest.** FastAPI's documentation — 155 markdown files — is split along heading
+boundaries rather than into fixed-size windows, so every chunk keeps its heading path
+(`Tutorial > Dependencies > Sub-dependencies`). That way a citation names something a human
+can actually navigate to. 2,370 chunks, embedded and stored in Postgres with pgvector.
+
+**2. Retrieve.** Two searches run over every question: dense vector similarity, which
+understands meaning, and lexical keyword matching, which catches exact tokens like `422` and
+`Depends` that embeddings blur. Their rankings are fused, then a cross-encoder reranks the
+survivors.
+
+**3. Decide whether to answer.** This is the part worth reading the code for. Reranking
+actually makes the *ranking* slightly worse — and it is kept anyway, because it is the only
+stage in the pipeline that produces a score you can compare against a threshold. Everything
+else can tell you what is most relevant; only this can tell you whether anything is relevant
+enough. Below the threshold, the system refuses.
+
+**4. Answer.** The model writes a reply, and the response schema restricts its citations to
+chunk IDs that were actually retrieved. It cannot cite a source it was never shown, because
+the decoder will not let it.
+
+**5. Measure.** 80 test questions, of which **15 have no answer anywhere in the corpus** and
+must be refused. Those 15 are what make the refusal behaviour measurable instead of
+aspirational.
+
+## What's running
+
+| piece | what it is |
+| --- | --- |
+| `retrieval` | owns the corpus, the embeddings and the search |
+| `answer` | runs the gate and the model, records every question as a trace |
+| `evals` | runs the golden dataset and scores it |
+| `web` | Next.js UI for asking, browsing eval runs, and reading traces |
+
+Three FastAPI services with a database each, Postgres with pgvector, Groq for generation and
+judging, and local models for embedding and reranking.
 
 ## Results
 
