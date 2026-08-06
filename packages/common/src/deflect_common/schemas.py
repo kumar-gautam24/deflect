@@ -77,7 +77,10 @@ class AnswerResponse(BaseModel):
 
 class RunEvalsRequest(BaseModel):
     limit: int | None = None
-    fail_under: float | None = Field(default=None, ge=0.0, le=1.0)
+    # Removed: a run is submitted before anything is scored, so there is no
+    # faithfulness to compare against. Leaving it would silently ignore a caller's
+    # gate, which is worse than making them notice it moved. CI polls and applies
+    # the threshold itself.
     # Sweeps a retrieval variant through the answer service end to end. The query is
     # replaced per item; the rest is what the run is measuring.
     search: SearchRequest | None = None

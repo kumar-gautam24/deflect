@@ -101,8 +101,15 @@ services:
         sync: false
       - key: OPERATOR_TOKEN
         sync: false
+      # A disk, because the worker is the process that reads the corpus. Without one,
+      # CORPUS_ROOT points at an empty path and every ingest succeeds with zero chunks --
+      # which is exactly how this went unnoticed in development.
       - key: CORPUS_ROOT
         sync: false
+    disk:
+      name: corpus
+      mountPath: /corpus
+      sizeGB: 1
 
   - type: worker
     name: deflect-evals-worker
@@ -117,9 +124,23 @@ services:
         sync: false
       - key: GROQ_API_KEY
         sync: false
+      # The worker builds its own judge client and loads its own dataset, so it needs
+      # every provider setting the service has -- it is not a thin shell around it.
+      - key: LLM_PROVIDER
+        sync: false
+      - key: DATASET_PATH
+        sync: false
       - key: ANSWER_URL
         sync: false
       - key: SERVICE_TOKEN
         sync: false
       - key: OPERATOR_TOKEN
         sync: false
+
+# Redis carries work; Postgres carries truth. Losing this costs in-flight delivery, not
+# history, which is why a small instance is enough.
+services_note: |
+  Create a Render Key Value instance and set its connection string as REDIS_URL on
+  deflect-retrieval, deflect-evals and both workers. It is declared here as a note rather
+  than a service block because Render provisions key-value stores outside the services
+  list.
