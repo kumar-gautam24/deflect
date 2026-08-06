@@ -50,9 +50,13 @@ async def test_progress_counts_failed_items_as_finished(session, queue):
 
 
 async def test_the_run_list_carries_status(session, queue):
-    await _running_run(session, done=1, total=4)
+    run = await _running_run(session, done=1, total=4)
 
-    assert (await get("/eval-runs")).json()[0]["status"] == "running"
+    listed = (await get("/eval-runs")).json()
+
+    # Found by id rather than taken from position 0: the list is newest-first and capped
+    # at 50, so any run committed outside this test would take the slot.
+    assert next(r for r in listed if r["id"] == run.id)["status"] == "running"
 
 
 async def test_a_run_stays_publicly_readable(session, queue):

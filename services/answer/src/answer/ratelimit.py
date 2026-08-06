@@ -6,7 +6,7 @@ because it queries this service's own Trace model, and packages/common importing
 service's model is exactly the dependency direction the architecture forbids.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,5 +27,13 @@ async def questions_today(session: AsyncSession, now: datetime) -> int:
     question, so the day's counter already exists and survives a restart.
     """
     midnight = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-    statement = select(func.count()).select_from(Trace).where(Trace.created_at >= midnight)
+    # Bounded at both ends. With only the lower bound this counts today *and everything
+    # after it*, which is the same number for as long as `now` is the real clock and a
+    # different one the moment it is not -- so the cap was correct by luck, and any caller
+    # passing a fixed `now` silently counted rows from days that had not happened yet.
+    statement = (
+        select(func.count())
+        .select_from(Trace)
+        .where(Trace.created_at >= midnight, Trace.created_at < midnight + timedelta(days=1))
+    )
     return (await session.execute(statement)).scalar_one()

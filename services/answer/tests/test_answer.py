@@ -86,11 +86,17 @@ async def test_answering_writes_a_trace_and_an_escalation_row(
     session, make_app, hits, answer_payload
 ):
     app = make_app([answer_payload("Invented.", [], False)], FakeRetrieval(hits))
+    # A question unique to this test, so the rows it asserts on are its own.
+    question = "which question wrote the trace this test reads back"
 
-    await post(app, "/answer", {"question": "how do I declare a dependency"})
+    await post(app, "/answer", {"question": question})
 
-    trace = (await session.execute(select(Trace))).scalars().one()
-    escalation = (await session.execute(select(Escalation))).scalars().one()
+    trace = (
+        await session.execute(select(Trace).where(Trace.question == question))
+    ).scalars().one()
+    escalation = (
+        await session.execute(select(Escalation).where(Escalation.trace_id == trace.id))
+    ).scalars().one()
     assert trace.model == "fake"
     assert escalation.trace_id == trace.id
 

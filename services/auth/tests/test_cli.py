@@ -9,7 +9,9 @@ from auth.passwords import verify_password
 async def test_creating_an_admin_stores_a_hashed_password(session):
     await create_admin(session, email="a@x.com", password="pw", role="admin")
 
-    user = (await session.execute(select(AdminUser))).scalars().one()
+    user = (
+        await session.execute(select(AdminUser).where(AdminUser.email == "a@x.com"))
+    ).scalars().one()
 
     assert user.email == "a@x.com"
     assert user.role == "admin"

@@ -26,12 +26,16 @@ async def get(app, path: str) -> httpx.Response:
 
 
 async def test_run_list_is_newest_first(session, app):
-    session.add_all([make_run("old", 0.9), make_run("new", 0.8)])
+    session.add_all([make_run("order-old", 0.9), make_run("order-new", 0.8)])
     await session.flush()
 
     body = (await get(app, "/eval-runs")).json()
 
-    assert [r["git_sha"] for r in body[:2]] == ["new", "old"]
+    # Filtered to this test's own two runs rather than sliced off the front: ordering is
+    # the claim, and a run committed outside this test would occupy the first slots
+    # without saying anything about whether the sort works.
+    ours = [r["git_sha"] for r in body if r["git_sha"] in {"order-old", "order-new"}]
+    assert ours == ["order-new", "order-old"]
 
 
 async def test_run_detail_includes_per_item_results(session, app):

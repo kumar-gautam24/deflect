@@ -1,6 +1,6 @@
 from deflect_common.jobs import EVAL_ITEM_STREAM
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from evals.main import app
 from evals.models import EvalItemJob, EvalRun
@@ -68,8 +68,14 @@ async def test_an_empty_dataset_is_rejected_before_a_run_is_created(
     empty.write_text("[]\n")
     monkeypatch.setenv("DATASET_PATH", str(empty))
     get_settings.cache_clear()
+    # A high-water mark rather than an empty-table check: "this request created no run" is
+    # the claim, and asserting the table is empty also asserts something about rows this
+    # test never wrote.
+    highest = (await session.execute(select(func.max(EvalRun.id)))).scalar() or 0
     try:
         assert (await post("/runs", OPERATOR, {"limit": None})).status_code == 422
-        assert (await session.execute(select(EvalRun))).scalars().all() == []
+        assert (
+            await session.execute(select(EvalRun).where(EvalRun.id > highest))
+        ).scalars().all() == []
     finally:
         get_settings.cache_clear()

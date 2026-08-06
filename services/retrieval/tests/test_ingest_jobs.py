@@ -1,6 +1,6 @@
 from deflect_common.jobs import INGEST_STREAM
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from retrieval.main import app
 from retrieval.models import IngestJob
@@ -26,9 +26,12 @@ async def test_ingest_accepts_and_returns_a_job_id(session, queue):
 async def test_ingest_records_the_job_before_enqueueing(session, queue):
     """A job that exists in Redis must always have a row behind it, or the worker has
     work referencing nothing."""
-    await request("POST", "/ingest", OPERATOR, {"root": "/corpus", "commit_sha": "abc"})
+    commit = "records-the-job-before-enqueueing"
+    await request("POST", "/ingest", OPERATOR, {"root": "/corpus", "commit_sha": commit})
 
-    job = (await session.execute(select(IngestJob))).scalars().one()
+    job = (
+        await session.execute(select(IngestJob).where(IngestJob.commit_sha == commit))
+    ).scalars().one()
 
     assert job.status == "queued"
     assert job.root == "/corpus"
@@ -38,10 +41,17 @@ async def test_ingest_records_the_job_before_enqueueing(session, queue):
 async def test_ingest_confinement_still_applies_before_a_job_is_created(session, queue):
     """Rejecting the path after creating a job would leave a queued job that can only
     ever fail."""
+    # A high-water mark rather than an empty-table check: "this request created nothing"
+    # is the claim, and asserting the table is empty also asserts something about rows
+    # this test never wrote.
+    highest = (await session.execute(select(func.max(IngestJob.id)))).scalar() or 0
+
     response = await request("POST", "/ingest", OPERATOR, {"root": "/etc", "commit_sha": "x"})
 
     assert response.status_code == 400
-    assert (await session.execute(select(IngestJob))).scalars().all() == []
+    assert (
+        await session.execute(select(IngestJob).where(IngestJob.id > highest))
+    ).scalars().all() == []
 
 
 async def test_ingest_still_requires_an_operator_credential(session, queue):
