@@ -162,3 +162,7 @@ async def test_a_duplicate_score_does_not_kill_the_worker(session):
     await process_one(session, queue, claimed, _score)
 
     assert await queue.pending_count(EVAL_ITEM_STREAM) == 0
+    # The rollback would otherwise discard the done marker too, and the fan-in counts
+    # only done or failed -- so the run would wait forever on an item already scored.
+    assert job.status == "done"
+    assert run.status == "complete"

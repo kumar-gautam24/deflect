@@ -95,26 +95,26 @@ async def process_one(
         return
 
     result.run_id = job.run_id
-    session.add(result)
     job.status = "done"
     job.error = None
 
     try:
-        await _record_provenance(session, job.run_id, outcome)
-        await finalise_if_complete(session, job.run_id)
-        await session.commit()
-    except IntegrityError:
-        # Another worker already scored this item. Reclaiming cannot distinguish a dead
-        # worker from a slow one, so an item taking longer than the visibility timeout is
-        # handed to a second worker while the first is still running it -- and both then
-        # insert against the unique constraint on (run_id, item_id).
+        # A savepoint, so a duplicate insert undoes only itself. Reclaiming cannot tell a
+        # dead worker from a slow one, so an item exceeding the visibility timeout is
+        # handed to a second worker while the first still holds it, and both insert
+        # against the unique constraint on (run_id, item_id).
         #
-        # The constraint is what keeps the score from being counted twice. Catching it
-        # here is what keeps that from killing the worker process: unhandled, it
-        # propagates out of the run loop and the container dies with a queue still full.
-        await session.rollback()
+        # A full rollback here would discard the done marker as well, and the fan-in
+        # counts only done or failed -- the run would then wait forever on an item that
+        # had in fact been scored, which is the exact stall this design exists to prevent.
+        async with session.begin_nested():
+            session.add(result)
+    except IntegrityError:
         logger.info("eval item %s was already scored by another worker", job.item_id)
 
+    await _record_provenance(session, job.run_id, outcome)
+    await finalise_if_complete(session, job.run_id)
+    await session.commit()
     await queue.acknowledge(EVAL_ITEM_STREAM, delivery.message_id)
 
 
