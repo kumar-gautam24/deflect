@@ -1,9 +1,15 @@
+from datetime import UTC, datetime
+
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Computed, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Computed, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from retrieval.config import get_settings
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
 class Base(DeclarativeBase):
@@ -37,3 +43,25 @@ class Chunk(Base):
     )
 
     __table_args__ = (Index("ix_chunks_document_id", "document_id"),)
+
+
+class IngestJob(Base):
+    """One ingest request, and everything known about how it went.
+
+    The row is the source of truth; the Redis message carries only this id, so status
+    survives a lost Redis volume and answers even while the broker is down.
+    """
+
+    __tablename__ = "ingest_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    root: Mapped[str] = mapped_column(String(1024))
+    commit_sha: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    chunks: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )

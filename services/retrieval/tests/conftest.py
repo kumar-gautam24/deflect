@@ -21,3 +21,20 @@ async def session():
         async with AsyncSession(bind=connection, expire_on_commit=False) as db:
             yield db
         await transaction.rollback()
+
+
+@pytest_asyncio.fixture
+async def queue(session):
+    """Binds the app to the test transaction and an in-memory queue, so no test needs
+    Redis and none leaves a row behind."""
+    from deflect_common.jobs import FakeJobQueue
+
+    from retrieval.db import get_session
+    from retrieval.main import app, build_queue
+
+    fake = FakeJobQueue()
+    session.commit = session.flush
+    app.dependency_overrides[get_session] = lambda: session
+    app.dependency_overrides[build_queue] = lambda: fake
+    yield fake
+    app.dependency_overrides.clear()

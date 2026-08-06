@@ -1,21 +1,25 @@
+import asyncio
+import json
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Annotated
 
 from deflect_common.auth import bearer_guard
+from deflect_common.jobs import INGEST_STREAM, JobQueue, RedisJobQueue
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
 from deflect_common.schemas import (
     IngestRequest,
-    IngestResponse,
     SearchRequest,
     SearchResponse,
 )
 from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
 
 from retrieval.config import get_settings
 from retrieval.db import SessionDep
-from retrieval.ingest.pipeline import ingest_directory
-from retrieval.models import Document
+from retrieval.models import Document, IngestJob
 from retrieval.pipeline import RetrievalConfig, retrieve
 
 # Interactive docs are an inventory of the attack surface, and nobody browses them on a
@@ -36,6 +40,13 @@ app.add_middleware(RequestIdMiddleware)
 _settings = get_settings()
 require_service = bearer_guard(_settings.service_token, "service")
 require_operator = bearer_guard(_settings.operator_token, "operator")
+
+
+def build_queue() -> JobQueue:
+    return RedisJobQueue(get_settings().redis_url)
+
+
+QueueDep = Annotated[JobQueue, Depends(build_queue)]
 
 
 @app.get("/health")
@@ -109,12 +120,67 @@ def resolve_corpus_path(root: str, corpus_root: Path) -> Path:
     return requested
 
 
-@app.post("/ingest", dependencies=[Depends(require_operator)])
-async def ingest(request: IngestRequest, session: SessionDep) -> IngestResponse:
+@app.post("/ingest", status_code=202, dependencies=[Depends(require_operator)])
+async def ingest(request: IngestRequest, session: SessionDep, queue: QueueDep) -> dict:
+    """Accept the work and return. Embedding 2,370 chunks behind a held-open connection
+    is what this endpoint used to do, and a client disconnect lost all of it.
+
+    The path is validated before a row exists: rejecting afterwards would leave a queued
+    job that can only ever fail.
+    """
     root = resolve_corpus_path(request.root, get_settings().corpus_root)
-    count = await ingest_directory(session, root, request.commit_sha)
+
+    job = IngestJob(root=str(root), commit_sha=request.commit_sha)
+    session.add(job)
+    await session.flush()
+
+    # Row first, then the message, both inside this transaction. A failed enqueue rolls
+    # the row back, so a message never refers to a job that does not exist.
+    await queue.enqueue(INGEST_STREAM, job.id)
     await session.commit()
-    return IngestResponse(chunks=count)
+
+    return {"job_id": job.id}
+
+
+@app.get("/jobs/{job_id}", dependencies=[Depends(require_operator)])
+async def job_status(job_id: int, session: SessionDep) -> dict:
+    job = await session.get(IngestJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"job {job_id} not found")
+    return _job_payload(job)
+
+
+@app.get("/jobs/{job_id}/events", dependencies=[Depends(require_operator)])
+async def job_events(job_id: int, session: SessionDep) -> StreamingResponse:
+    """Progress as SSE, closing once the job reaches a terminal state.
+
+    Polled from the database rather than subscribed from Redis: the database is the
+    source of truth, and a stream fed from the broker would disagree with /jobs/{id}
+    the moment a message was redelivered.
+    """
+
+    async def stream() -> AsyncIterator[str]:
+        while True:
+            await session.refresh(job) if (job := await session.get(IngestJob, job_id)) else None
+            if job is None:
+                yield f"data: {json.dumps({'error': 'not found'})}\n\n"
+                return
+            yield f"data: {json.dumps(_job_payload(job))}\n\n"
+            if job.status in ("done", "failed"):
+                return
+            await asyncio.sleep(2)
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+def _job_payload(job: IngestJob) -> dict:
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "attempts": job.attempts,
+        "chunks": job.chunks,
+        "error": job.error,
+    }
 
 
 @app.get("/metrics", dependencies=[Depends(require_service)])
