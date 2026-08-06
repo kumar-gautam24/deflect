@@ -19,11 +19,16 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./scripts/create-databases.sql:/docker-entrypoint-initdb.d/10-databases.sql:ro
 
+  # Password-protected because Redis now decides who is logged in: anything that can write
+  # a session: key mints an admin session for every service. It is published on a host
+  # port, so "it is only localhost" is not the whole story. Render's Key Value instance is
+  # private and authenticated; this is the local equivalent.
   redis:
     image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-dev-redis-password}"]
     ports: ["${REDIS_PORT:-6379}:6379"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-dev-redis-password}", "ping"]
       interval: 5s
       retries: 10
     volumes:
@@ -35,7 +40,7 @@ services:
       dockerfile: services/retrieval/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_retrieval
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-dev-redis-password}@redis:6379/0
       ENV: ${ENV:-development}
       SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
       OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
@@ -51,7 +56,7 @@ services:
       dockerfile: services/answer/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_answer
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-dev-redis-password}@redis:6379/0
       RETRIEVAL_URL: http://retrieval:8001
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -75,7 +80,7 @@ services:
       dockerfile: services/evals/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_evals
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-dev-redis-password}@redis:6379/0
       ANSWER_URL: http://answer:8002
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -100,7 +105,7 @@ services:
       dockerfile: services/auth/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_auth
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-dev-redis-password}@redis:6379/0
       ENV: ${ENV:-development}
       SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
       OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
@@ -125,7 +130,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_retrieval
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-dev-redis-password}@redis:6379/0
       CORPUS_ROOT: /corpus
       ENV: ${ENV:-development}
       SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
@@ -142,7 +147,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_evals
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-dev-redis-password}@redis:6379/0
       ANSWER_URL: http://answer:8002
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}

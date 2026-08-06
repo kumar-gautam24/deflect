@@ -247,9 +247,9 @@ version had failed twice in practice, not because a diagram looked better with o
 
 | service | route | principal |
 | --- | --- | --- |
-| all three | `GET /health` (liveness), `GET /ready` (readiness) | public |
-| all three | `GET /metrics` | service |
-| all three | `/docs`, `/redoc`, `/openapi.json` | public in development, absent when `ENV=production` |
+| all four | `GET /health` (liveness), `GET /ready` (readiness) | public |
+| all four | `GET /metrics` | service |
+| all four | `/docs`, `/redoc`, `/openapi.json` | public in development, absent when `ENV=production` |
 | retrieval | `GET /documents` | service |
 | retrieval | `POST /search` | service |
 | retrieval | `POST /ingest` | operator, plus path confinement — returns `202` |
@@ -286,11 +286,29 @@ question that matters as soon as more than one person can trigger an ingest or a
 An `auth` service issues opaque sessions — 32 random bytes, stored only as a SHA-256, so a
 dump of its database yields nothing replayable. Services read those sessions from Redis
 rather than calling auth, so none of them depends on auth being reachable to serve its own
-data; the cost is that revocation is bounded by the cache TTL rather than instant, which is
-why that TTL is five minutes.
+data.
+
+That Redis entry carries the session's own twelve-hour lifetime, because it is the only
+thing the other services consult. A shorter cache TTL is tempting as a revocation backstop,
+but it would not bound revocation — it would quietly *become* the session length, logging an
+admin out everywhere while their cookie and their database row both still called the session
+live. Revocation is therefore the explicit delete that logout performs, and the cost is that
+a delete which never lands leaves a session usable until it would have expired anyway.
+
+The consequence worth stating plainly: **Redis is now an authentication authority.** Before
+the auth service it held job messages, and a compromise meant forged work. Now anything that
+can write a `session:<sha256>` key mints an admin session accepted by every service. On
+Render it is a private, authenticated Key Value instance; locally it is password-protected
+in `docker-compose.yml` rather than left open on a published port.
 
 Two roles draw the line that exists in this system: a **viewer** can read traces and eval
 runs, an **admin** can also spend two hours of provider quota by starting a run.
+
+Five wrong passwords lock an account for fifteen minutes. A locked account is refused with
+the same `401` and the same body as a wrong password, and no `Retry-After`: the lockout is
+reachable only for an account that exists, so any reply that differed would answer "is this
+address an admin?" in five requests. The admin is not told why; the operator finds it in the
+auth service's logs, which record the user id and nothing else.
 
 Accounts are created with `python -m auth.cli create-admin --email you@example.com`. There
 is no signup route: this system has operators, not users.

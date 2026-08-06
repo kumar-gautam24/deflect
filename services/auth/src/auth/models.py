@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -28,6 +28,15 @@ class AdminUser(Base):
         DateTime(timezone=True), default=_now, onupdate=_now
     )
 
+    # Declared here as well as in migration 0001 so that `alembic revision --autogenerate`
+    # sees it as already present. Left off the model, autogenerate proposes dropping it --
+    # and this index is the only thing enforcing case-insensitive uniqueness, since the
+    # UNIQUE on email above is case-sensitive. Losing it would silently let You@x.com and
+    # you@x.com both exist, with one of them unable to log in reliably.
+    __table_args__ = (
+        Index("admin_users_email_lower_idx", text("lower(email)"), unique=True),
+    )
+
 
 class Session(Base):
     """A live login.
@@ -49,3 +58,13 @@ class Session(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    # "every live session for this user" -- the logout-everywhere query. Declared for the
+    # same reason as the index above: to keep autogenerate from proposing its removal.
+    __table_args__ = (
+        Index(
+            "sessions_user_live_idx",
+            "user_id",
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )

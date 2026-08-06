@@ -1,3 +1,4 @@
+import logging
 import time
 from datetime import UTC, datetime
 from typing import Annotated
@@ -9,6 +10,9 @@ from deflect_common.ratelimit import SlidingWindowLimiter, client_address
 from deflect_common.schemas import LoginRequest
 from deflect_common.sessions import RedisSessionStore, SessionStore
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy import select, text
 
 from auth.config import get_settings
@@ -17,6 +21,8 @@ from auth.models import AdminUser
 from auth.models import Session as SessionRow
 from auth.policy import Policy
 from auth.service import AccountLocked, LoginFailed, login, logout, logout_all
+
+logger = logging.getLogger(__name__)
 
 # Interactive docs are an inventory of the attack surface, and nobody browses them on a
 # deployed service. Disabled in production; the policy table records that they are public
@@ -30,6 +36,23 @@ app = FastAPI(title="Deflect auth", **_docs)
 configure_logging()
 app.add_middleware(RequestIdMiddleware)
 router = APIRouter()
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Say what was wrong with the request without quoting the request back.
+
+    Pydantic attaches the offending value to every validation error, and when the failure
+    is a missing field that value is the whole body -- so misspelling "email" returns the
+    plaintext password to the caller, and leaves it in whatever proxy log or error tracker
+    the response passes through. The constraint is that a password exists nowhere but its
+    hash, so the input is dropped rather than truncated or masked.
+    """
+    without_input = [
+        {key: value for key, value in error.items() if key != "input"}
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(without_input)})
 
 # Built at import, not per request: an unset token or url aborts this module and uvicorn
 # exits before binding a port, the same refuse-to-boot behaviour every other service has.
@@ -114,11 +137,17 @@ async def login_route(
         )
     except AccountLocked as locked:
         await session.commit()
-        raise HTTPException(
-            423,
-            "account temporarily locked",
-            headers={"Retry-After": str(locked.seconds_remaining)},
-        ) from locked
+        # Deliberately the same status, body and headers as a wrong password. AccountLocked
+        # is raised only for an account that exists, so a 423 -- or a Retry-After -- would
+        # answer "is this address an admin?" in five requests, which is the question the
+        # single 401 below exists to refuse. The cost is that a locked-out admin is not
+        # told why; this log line is where an operator finds out.
+        logger.warning(
+            "login refused: account %s locked for %s more seconds",
+            locked.user_id,
+            locked.seconds_remaining,
+        )
+        raise HTTPException(401, "invalid email or password") from locked
     except LoginFailed as failed:
         # Committed so the failure count survives, then one message for both a wrong
         # password and an unknown address.

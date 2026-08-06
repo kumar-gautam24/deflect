@@ -4,8 +4,15 @@ Postgres is the record and this is the working copy. Services read here rather t
 querying the auth database, so no service depends on auth being reachable to serve its own
 data -- you simply cannot log in while it is down.
 
-The cost is that revocation is bounded rather than instant: if a delete is missed, a
-session stays usable until its entry expires. That is why the TTL is short.
+An entry is written with the whole remaining lifetime of the session it stands for, which
+makes revocation the job of the explicit delete on logout rather than of expiry. A shorter
+TTL is tempting as a backstop, but since this is the only place a service looks, it would
+not bound revocation -- it would quietly become the session length, ending sessions whose
+cookie and database row both still called them live.
+
+The cost is that a delete which never lands leaves a revoked session usable until it would
+have expired anyway. Both writers of that delete run on the same code path as the database
+write, so the gap is a Redis failure rather than a logic error.
 """
 
 import json
@@ -45,8 +52,16 @@ class RedisSessionStore:
         raw = await self._redis.get(_PREFIX + token_hash)
         if raw is None:
             return None
-        record = json.loads(raw)
-        return record["user_id"], record["role"]
+
+        try:
+            record = json.loads(raw)
+            return record["user_id"], record["role"]
+        except (ValueError, TypeError, KeyError):
+            # A value we cannot read is one session that fails to resolve, not an outage.
+            # Letting it raise would escape the guard dependency and 500 every request
+            # presenting a session, on all four services at once -- the same reasoning
+            # that made verify_password return False rather than raise.
+            return None
 
     async def put(self, token_hash: str, user_id: str, role: str, ttl_seconds: int) -> None:
         if ttl_seconds <= 0:
@@ -75,9 +90,9 @@ class RedisSessionStore:
 class FakeSessionStore:
     """In-memory store with the same semantics, for tests.
 
-    Expiry is modelled rather than ignored: the TTL is the ceiling on how long a revoked
-    session survives a missed delete, so a fake that never expired anything would hide the
-    one property that bound matters for.
+    Expiry is modelled rather than ignored: the TTL is the session's own lifetime, so a
+    fake that never expired anything would hide the fact that this store decides when a
+    session ends everywhere except the auth service itself.
     """
 
     def __init__(self) -> None:

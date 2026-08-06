@@ -61,17 +61,47 @@ async def test_a_wrong_password_and_an_unknown_email_return_the_same_body(sessio
     assert wrong.json() == unknown.json()
 
 
-async def test_a_locked_account_returns_423_with_retry_after(session, app):
-    user = await _user(session)
+async def test_a_locked_account_is_indistinguishable_from_an_unknown_one(session, app):
+    """A lockout must not answer "does this address have an admin account?".
+
+    AccountLocked is raised only for a row that exists, so any reply that differs from the
+    unknown-address one identifies an admin in five requests -- the exact leak the shared
+    401 above is built to prevent. A Retry-After header would give it away just as
+    completely as a distinct status code.
+    """
+    user = await _user(session, email="locked@x.com")
     user.locked_until = datetime.now(UTC) + timedelta(minutes=5)
     await session.flush()
 
-    response = await call(
-        app, "POST", "/auth/login", json={"email": "a@x.com", "password": "pw"}
+    locked = await call(
+        app, "POST", "/auth/login", json={"email": "locked@x.com", "password": "pw"}
+    )
+    unknown = await call(
+        app, "POST", "/auth/login", json={"email": "nobody@x.com", "password": "pw"}
     )
 
-    assert response.status_code == 423
-    assert "Retry-After" in response.headers
+    assert locked.status_code == 401
+    assert unknown.status_code == 401
+    assert locked.json() == unknown.json()
+    assert "Retry-After" not in locked.headers
+
+
+async def test_a_malformed_login_body_never_echoes_the_password(session, app):
+    """Misspelling a field must not send the password back out.
+
+    Pydantic reports the offending input with each error, and for a missing field that
+    input is the entire body -- so the default 422 hands the plaintext password to the
+    caller and to every proxy log and error tracker the response crosses. A password is
+    supposed to exist nowhere but its hash.
+    """
+    response = await call(
+        app, "POST", "/auth/login", json={"emial": "a@x.com", "password": "hunter2"}
+    )
+
+    assert response.status_code == 422
+    assert "hunter2" not in response.text
+    # Still says which field was wrong -- stripping the value must not cost the diagnosis.
+    assert "email" in response.text
 
 
 async def test_me_returns_the_role_for_a_valid_session(session, app):

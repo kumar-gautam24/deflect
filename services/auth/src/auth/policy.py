@@ -10,11 +10,13 @@ class Policy:
     # machine is not a standing invitation.
     SESSION_HOURS = 12
 
-    # The ceiling on how long a revoked session survives a missed cache delete. Not a
-    # performance number: this is the security bound, and it is why it is minutes rather
-    # than hours.
-    CACHE_TTL_SECONDS = 300
-
+    # There is deliberately no separate cache TTL. The session's cache entry is written
+    # with the session's own remaining lifetime, because any shorter value silently
+    # becomes the real session length: services read the cache and never the auth
+    # database, so an entry that expires early logs the person out everywhere while their
+    # cookie and their row both still say twelve hours. Revocation is by explicit delete
+    # on logout, not by expiry.
+    #
     # Five wrong passwords is a person misremembering; more is someone guessing.
     LOCK_AFTER_FAILURES = 5
     LOCK_SECONDS = 15 * 60

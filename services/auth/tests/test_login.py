@@ -1,5 +1,8 @@
+import time
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
+import deflect_common.sessions as sessions_module
 import pytest
 from deflect_common.auth import hash_token
 from deflect_common.sessions import FakeSessionStore
@@ -27,6 +30,35 @@ async def test_a_correct_password_issues_a_session(session):
 
     assert row.expires_at == NOW + timedelta(hours=Policy.SESSION_HOURS)
     assert await store.get(hash_token(token)) == (str(row.user_id), "admin")
+
+
+async def test_the_cache_entry_lasts_as_long_as_the_session(session, monkeypatch):
+    """Regression: the entry was written with a fixed 300s TTL while both the session row
+    and the browser cookie said twelve hours.
+
+    Every service but auth resolves a session from this store alone, so its TTL *is* the
+    session length -- a shorter one logged an admin out of /traces five minutes after
+    logging in, forever. No test expressed the relationship between the two lifetimes,
+    which is why three task-scoped reviews passed over it.
+    """
+    await _user(session)
+    store = FakeSessionStore()
+
+    token, _ = await login(session, store, "a@x.com", "pw", now=NOW)
+    start = time.monotonic()
+
+    # An hour in: long past any cache TTL, well short of the session's own expiry.
+    monkeypatch.setattr(
+        sessions_module, "time", SimpleNamespace(monotonic=lambda: start + 3600)
+    )
+    assert await store.get(hash_token(token)) is not None
+
+    monkeypatch.setattr(
+        sessions_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: start + Policy.SESSION_HOURS * 3600 + 1),
+    )
+    assert await store.get(hash_token(token)) is None
 
 
 async def test_only_the_hash_of_the_token_is_stored(session):

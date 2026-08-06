@@ -26,9 +26,17 @@ class LoginFailed(Exception):
 
 
 class AccountLocked(Exception):
-    def __init__(self, seconds_remaining: int) -> None:
+    """Raised only for an account that exists, which is why the route must not say so.
+
+    The user id rides along so the route can log which account was locked. It is the one
+    identifier that may appear in a log -- an email there would put the very fact the
+    reply withholds into a file that is easier to read than the API.
+    """
+
+    def __init__(self, seconds_remaining: int, user_id: int) -> None:
         super().__init__(f"locked for {seconds_remaining} more seconds")
         self.seconds_remaining = seconds_remaining
+        self.user_id = user_id
 
 
 async def login(
@@ -51,7 +59,7 @@ async def login(
     ).scalar_one_or_none()
 
     if user is not None and user.locked_until and user.locked_until > now:
-        raise AccountLocked(int((user.locked_until - now).total_seconds()))
+        raise AccountLocked(int((user.locked_until - now).total_seconds()), user.id)
 
     # The hash runs whether or not the account exists. Skipping it for an unknown address
     # would make the response measurably faster and turn login into an account oracle.
@@ -84,8 +92,15 @@ async def login(
     session.add(row)
     await session.flush()
 
+    # The cache entry lasts exactly as long as the session it stands for. Every other
+    # service resolves a session from the cache alone, so a shorter TTL here would not
+    # bound revocation -- it would end the session, while the cookie and the row above
+    # both still claimed twelve hours.
     await sessions.put(
-        row.token_hash, str(user.id), user.role, ttl_seconds=Policy.CACHE_TTL_SECONDS
+        row.token_hash,
+        str(user.id),
+        user.role,
+        ttl_seconds=int((row.expires_at - now).total_seconds()),
     )
     return token, row
 
