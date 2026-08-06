@@ -710,7 +710,10 @@ class Policy:
 
     # Login performs an argon2id hash, which is deliberately expensive, so the endpoint
     # is a denial-of-service target without a limit in front of it.
-    LOGIN_ATTEMPTS_PER_HOUR = 20
+    # A backstop against CPU exhaustion, not the control -- account lockout is that, and
+    # it is per-account rather than per-address. Sized so that an attacker filling this
+    # bucket cannot also stop a legitimate admin logging in.
+    LOGIN_ATTEMPTS_PER_HOUR = 60
 ```
 
 Create `services/auth/src/auth/models.py`:
@@ -1298,6 +1301,22 @@ async def login_route(request: LoginRequest, http: Request, session: SessionDep)
 `/auth/logout` and `/auth/logout-all` take `current_session` and call the service functions; `/auth/me` returns the user's email, role and the session expiry. `LoginRequest` is a two-field pydantic model in `packages/common/schemas.py` alongside the others.
 
 **`client_address` is called with `trust_forwarded=False`.** Login is reached from the web app, which does hold the service token — but trusting a forwarded address here would let anyone with that token spread login attempts across fabricated addresses and defeat the limiter.
+
+**That is not sufficient on its own, and this is the subtle part.** uvicorn rewrites
+`request.client` from `X-Forwarded-For` *before the application runs*, for any peer inside
+`forwarded_allow_ips` — which defaults to `127.0.0.1`. So `trust_forwarded=False` reads an
+address the caller supplied, and the limiter becomes decorative. **Every service's gunicorn
+command must set `--forwarded-allow-ips=""`**, so `request.client` is genuinely the socket
+peer and the application alone decides what to trust. Leaving it to a default whose meaning
+changes with deployment topology is how a control silently stops working.
+
+Behind a proxy this makes `request.client` the proxy's address, so anonymous callers share
+one bucket. That is stricter rather than weaker, and it fails in the safe direction.
+
+**The login limit is a backstop, not the control.** Account lockout after five failures is
+the precise one — it is per-account and cannot be spread across addresses. The rate limit
+exists to stop an unauthenticated endpoint burning CPU on argon2 hashes, so it is sized
+generously enough that an attack cannot lock a legitimate admin out of logging in.
 
 - [ ] **Step 5: Write the route tests**
 
