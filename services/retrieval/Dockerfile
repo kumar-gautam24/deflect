@@ -30,8 +30,15 @@ USER deflect
 # Two workers because retrieval embeds and reranks in-process, which is CPU-bound and
 # blocks the event loop -- async concurrency alone does not help there. Gunicorn also
 # brings graceful shutdown, so in-flight requests finish on SIGTERM.
+#
+# Explicit, because the default trusts 127.0.0.1 and rewrites request.client from
+# X-Forwarded-For before the application runs -- which silently defeats every
+# trust_forwarded=False decision the code makes. Behind a proxy this makes
+# request.client the proxy's address, so anonymous callers share one bucket: stricter
+# rather than weaker, and it fails in the safe direction.
 CMD ["gunicorn", "retrieval.main:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--workers", "2", "--bind", "0.0.0.0:8001", \
-     "--graceful-timeout", "30", "--timeout", "120"]
+     "--graceful-timeout", "30", "--timeout", "120", \
+     "--forwarded-allow-ips", ""]
 

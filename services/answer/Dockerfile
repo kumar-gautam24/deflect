@@ -34,8 +34,15 @@ USER deflect
 #
 # When the job queue arrives and brings Redis, the limiter moves there and this can scale
 # out. Until then, raising this number weakens the abuse control.
+#
+# Explicit, because the default trusts 127.0.0.1 and rewrites request.client from
+# X-Forwarded-For before the application runs -- which silently defeats every
+# trust_forwarded=False decision the code makes. Behind a proxy this makes
+# request.client the proxy's address, so anonymous callers share one bucket: stricter
+# rather than weaker, and it fails in the safe direction.
 CMD ["gunicorn", "answer.main:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--workers", "1", "--bind", "0.0.0.0:8002", \
-     "--graceful-timeout", "30", "--timeout", "300"]
+     "--graceful-timeout", "30", "--timeout", "300", \
+     "--forwarded-allow-ips", ""]
 

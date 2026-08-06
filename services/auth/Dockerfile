@@ -20,7 +20,17 @@ RUN uv sync --no-dev --frozen
 RUN useradd --system --uid 10001 --create-home --home-dir /home/deflect deflect \
     && chown -R deflect /app
 USER deflect
+# One worker: the login limiter is an in-process dict, so N workers would mean N
+# independent buckets and the limit would silently become N times what it says. The same
+# reasoning pins the answer service to one worker.
+#
+# Explicit, because the default trusts 127.0.0.1 and rewrites request.client from
+# X-Forwarded-For before the application runs -- which silently defeats every
+# trust_forwarded=False decision the code makes. Behind a proxy this makes
+# request.client the proxy's address, so anonymous callers share one bucket: stricter
+# rather than weaker, and it fails in the safe direction.
 CMD ["gunicorn", "auth.main:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--workers", "2", "--bind", "0.0.0.0:8004", \
-     "--graceful-timeout", "30", "--timeout", "120"]
+     "--workers", "1", "--bind", "0.0.0.0:8004", \
+     "--graceful-timeout", "30", "--timeout", "120", \
+     "--forwarded-allow-ips", ""]

@@ -29,8 +29,14 @@ RUN useradd --system --uid 10001 --create-home --home-dir /home/deflect deflect 
     && mkdir -p /app/.cache/huggingface \
     && chown -R deflect /app /home/deflect
 USER deflect
+# Explicit, because the default trusts 127.0.0.1 and rewrites request.client from
+# X-Forwarded-For before the application runs -- which silently defeats every
+# trust_forwarded=False decision the code makes. Behind a proxy this makes
+# request.client the proxy's address, so anonymous callers share one bucket: stricter
+# rather than weaker, and it fails in the safe direction.
 CMD ["gunicorn", "evals.main:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--workers", "2", "--bind", "0.0.0.0:8003", \
-     "--graceful-timeout", "30", "--timeout", "120"]
+     "--graceful-timeout", "30", "--timeout", "120", \
+     "--forwarded-allow-ips", ""]
 
