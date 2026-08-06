@@ -1,7 +1,14 @@
 import pytest
 from fastapi import HTTPException
 
-from deflect_common.auth import bearer_guard, token_matches
+from deflect_common.auth import (
+    Principal,
+    bearer_guard,
+    hash_token,
+    resolve_principal,
+    token_matches,
+)
+from deflect_common.sessions import FakeSessionStore
 
 
 def test_a_correct_bearer_token_is_accepted():
@@ -65,3 +72,97 @@ def test_token_matches_is_exact():
     assert token_matches("s3cret", "Bearer s3cre") is False
     assert token_matches("s3cret", "bearer s3cret") is True  # scheme is case-insensitive
     assert token_matches("s3cret", None) is False
+
+
+async def _store_with(token: str, user_id: str = "u1", role: str = "admin") -> FakeSessionStore:
+    store = FakeSessionStore()
+    await store.put(hash_token(token), user_id=user_id, role=role, ttl_seconds=300)
+    return store
+
+
+async def test_the_service_token_resolves_to_the_service_principal():
+    found = await resolve_principal(
+        "Bearer svc", service_token="svc", operator_token="op", sessions=FakeSessionStore()
+    )
+
+    assert found == Principal(kind="service")
+
+
+async def test_the_operator_token_resolves_to_the_operator_principal():
+    found = await resolve_principal(
+        "Bearer op", service_token="svc", operator_token="op", sessions=FakeSessionStore()
+    )
+
+    assert found == Principal(kind="operator")
+
+
+async def test_a_session_resolves_to_its_role_and_user():
+    store = await _store_with("sess-abc", user_id="u7", role="viewer")
+
+    found = await resolve_principal(
+        "Bearer sess-abc", service_token="svc", operator_token="op", sessions=store
+    )
+
+    assert found == Principal(kind="session", role="viewer", user_id="u7")
+
+
+async def test_an_unknown_token_resolves_to_nothing():
+    found = await resolve_principal(
+        "Bearer nope", service_token="svc", operator_token="op", sessions=FakeSessionStore()
+    )
+
+    assert found is None
+
+
+async def test_a_missing_header_resolves_to_nothing():
+    found = await resolve_principal(
+        None, service_token="svc", operator_token="op", sessions=FakeSessionStore()
+    )
+
+    assert found is None
+
+
+async def test_a_machine_token_never_costs_a_session_lookup():
+    """The two comparisons short-circuit, so a service-to-service call does no I/O."""
+
+    class ExplodingStore(FakeSessionStore):
+        async def get(self, token_hash: str):
+            raise AssertionError("a machine token must not reach the session store")
+
+    assert await resolve_principal(
+        "Bearer svc", service_token="svc", operator_token="op", sessions=ExplodingStore()
+    ) == Principal(kind="service")
+
+
+async def test_only_the_service_token_satisfies_service():
+    """A logged-in human must never reach a machine-to-machine route."""
+    from deflect_common.auth import satisfies
+
+    assert satisfies(Principal(kind="service"), "service") is True
+    assert satisfies(Principal(kind="operator"), "service") is False
+    assert satisfies(Principal(kind="session", role="admin", user_id="u1"), "service") is False
+
+
+async def test_operator_accepts_the_operator_token_or_an_admin_session():
+    from deflect_common.auth import satisfies
+
+    assert satisfies(Principal(kind="operator"), "operator") is True
+    assert satisfies(Principal(kind="session", role="admin", user_id="u1"), "operator") is True
+    assert satisfies(Principal(kind="session", role="viewer", user_id="u1"), "operator") is False
+    # A service token is a machine, not an operator: collapsing them would let any
+    # service trigger spend.
+    assert satisfies(Principal(kind="service"), "operator") is False
+
+
+async def test_viewer_accepts_any_valid_session_or_the_operator_token():
+    from deflect_common.auth import satisfies
+
+    assert satisfies(Principal(kind="session", role="viewer", user_id="u1"), "viewer") is True
+    assert satisfies(Principal(kind="session", role="admin", user_id="u1"), "viewer") is True
+    assert satisfies(Principal(kind="operator"), "viewer") is True
+    assert satisfies(Principal(kind="service"), "viewer") is False
+
+
+def test_hashing_a_token_is_stable_and_not_the_token():
+    assert hash_token("abc") == hash_token("abc")
+    assert "abc" not in hash_token("abc")

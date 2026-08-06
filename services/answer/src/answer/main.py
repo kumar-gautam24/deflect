@@ -10,6 +10,11 @@ from deflect_common.auth import bearer_guard, token_matches
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
+from deflect_common.ratelimit import (
+    SlidingWindowLimiter,
+    client_address,
+    seconds_until_utc_midnight,
+)
 from deflect_common.schemas import AnswerRequest, AnswerResponse
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,12 +24,7 @@ from sqlalchemy import select, text
 from answer.config import get_settings
 from answer.db import SessionDep
 from answer.models import Trace
-from answer.ratelimit import (
-    SlidingWindowLimiter,
-    client_address,
-    questions_today,
-    seconds_until_utc_midnight,
-)
+from answer.ratelimit import questions_today
 from answer.retrieval_client import RetrievalClient
 from answer.service import answer_question
 

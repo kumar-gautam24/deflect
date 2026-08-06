@@ -1,6 +1,10 @@
 from datetime import UTC, datetime
 
-from answer.ratelimit import SlidingWindowLimiter, client_address, seconds_until_utc_midnight
+from deflect_common.ratelimit import (
+    SlidingWindowLimiter,
+    client_address,
+    seconds_until_utc_midnight,
+)
 
 
 def test_requests_up_to_the_limit_are_allowed():
