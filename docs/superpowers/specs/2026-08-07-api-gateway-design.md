@@ -36,7 +36,7 @@ this is not a response to an incident, and the README must not imply that it is.
 | gateway state | Redis only, no database | The gateway owns no data. Giving it a database to satisfy a pattern would break "database per service" by inverting it — the rule is that a service owning data owns its database, not that every service has one. |
 | where `apps/web` sits | BFF stays, retargeted at the gateway | The session cookie is httpOnly on the web origin, so something must translate cookie to Bearer. Doing it in the BFF avoids cross-origin credentialed requests between a Vercel domain and a Render one, and keeps a token out of the browser. |
 | route configuration | a declarative table | Decorators scattered across modules make the security posture something you assemble by reading. A table makes it something you read. |
-| limiter algorithm | GCRA leaky bucket, replacing the sliding-window log | A sliding-window log is exact but stores one entry per request and permits the whole allowance in a single burst — 20 questions in one second, then an hour of nothing. GCRA holds one float per key, smooths the burst to a tunable depth, and yields a truthful `Retry-After` as a by-product. **This changes observable behaviour and is therefore its own decision, not part of the relocation.** |
+| limiter algorithm | a leaky bucket, replacing the sliding-window log | A sliding-window log is exact but stores one entry per request and permits the whole allowance in a single burst — 20 questions in one second, then an hour of nothing. A bucket holds a level rather than a log, smooths the burst to a tunable depth, and yields a truthful `Retry-After` by division. Written as a level rather than as GCRA: same algorithm, one more float, far easier to picture. **This changes observable behaviour and is therefore its own decision, not part of the relocation.** |
 
 ## Architecture
 
@@ -61,7 +61,7 @@ Four modules, each with one job and testable alone:
 | --- | --- | --- |
 | `routes.py` | the route table: path, method, upstream, required principal, timeout, streaming | nothing |
 | `proxy.py` | streaming passthrough over httpx, header hygiene | `routes` |
-| `limits.py` | GCRA leaky bucket keyed by client address | `redis` |
+| `limits.py` | leaky bucket keyed by client address | `redis` |
 | `principal.py` | coarse allow/deny, then forward the credential untouched | `deflect_common.auth` |
 
 Keeping `routes.py` dependency-free is deliberate: the table is the artifact a reviewer reads
@@ -188,21 +188,27 @@ limit to wait a full hour. That header is wrong on `main` now, independent of th
 is fixed here rather than separately because the correct value only exists once the limiter
 can compute it.
 
-**GCRA** — leaky bucket in its virtual-scheduling form, the algorithm behind `redis-cell` —
-fixes all three:
+A **leaky bucket** fixes all three. A bucket of `capacity` units with a hole in it: each
+request pours one unit in, and the hole drains at the sustained rate, continuously.
 
 ```
-emission_interval = period / rate            # 3600/20 = 180s per question
-tau               = emission * (burst - 1)   # how much burst is tolerated
+leak_per_second = rate / period              # 20/3600 = one unit per 180s
+level           = max(0, stored_level - elapsed * leak_per_second)
 
-tat     = max(stored_tat, now)               # theoretical arrival time
-new_tat = tat + emission_interval
-allowed = (new_tat - tau) <= now
-retry_after = new_tat - tau - now            # honest, and free
+allowed     = level + 1 <= capacity
+retry_after = (level + 1 - capacity) / leak_per_second   # honest, and free
 ```
 
-One float per key rather than one sorted-set member per request, and a single Lua script, so
-the check is atomic without a pipeline round trip.
+Two floats per key — the level and when it was last seen — rather than one sorted-set member
+per request, and a single Lua script, so the check is atomic without a pipeline round trip.
+The clamp at zero matters: an idle bucket is empty rather than negative, or an address that
+went quiet for a day would come back able to send an unbounded burst.
+
+The same algorithm is often written as **GCRA**, which tracks the next permitted arrival time
+instead of the level and needs one float rather than two — exactly equivalent, since
+`level = (tat - now) / emission`. The level form is used here anyway. The saved float is not
+worth it: a bucket that drains is something a reader can picture, and a "theoretical arrival
+time" is something they have to look up.
 
 ```python
 class Limiter(Protocol):
@@ -211,7 +217,7 @@ class Limiter(Protocol):
 Decision(allowed: bool, retry_after: float)
 ```
 
-`InMemoryGCRA` and `RedisGCRA` both satisfy it, the way `SessionStore` already has a real and
+`InMemoryLeakyBucket` and `RedisLeakyBucket` both satisfy it, the way `SessionStore` already has a real and
 a fake implementation — the in-memory one for tests and single-worker use.
 
 **Tuning.** `/ask` becomes rate 20/hour with burst 5; login becomes rate 60/hour with burst
@@ -270,7 +276,7 @@ The route table is data, so the important tests are table-driven and cheap:
   allowed. `now` is already a parameter on the existing limiter, so this needs no sleeping.
 - **`Retry-After` is truthful.** Waiting the advertised interval must let the next request
   through. This is the test the current hardcoded value could never have passed.
-- **The two implementations agree.** `InMemoryGCRA` and `RedisGCRA` are driven through the
+- **The two implementations agree.** `InMemoryLeakyBucket` and `RedisLeakyBucket` are driven through the
   same sequence of calls and must return the same decisions, so the fake used in tests cannot
   drift from the real one.
 - **Header hygiene.** A client-supplied `X-Forwarded-For` or `X-Deflect-*` never reaches the
@@ -344,6 +350,6 @@ where the answer lives.
 
 1. Does the Render plan support Private Services? First thing to verify; the spec covers both.
 2. Does the gateway need more than one worker? At demo traffic one worker would keep
-   `InMemoryGCRA` viable and let `RedisGCRA` be deferred. Decide with a measurement rather
+   `InMemoryLeakyBucket` viable and let `RedisLeakyBucket` be deferred. Decide with a measurement rather
    than in advance — but note the shared-state version is what makes the worker count a free
    choice later, which is an argument for building it once rather than twice.
