@@ -33,6 +33,8 @@ class Delivery:
 
 
 class JobQueue(Protocol):
+    async def ensure_group(self, stream: str) -> None: ...
+
     async def enqueue(self, stream: str, job_id: int) -> None: ...
 
     async def claim(self, stream: str, consumer: str, count: int) -> list[Delivery]: ...
@@ -111,7 +113,11 @@ class FakeJobQueue:
     def __init__(self) -> None:
         self._ready: dict[str, list[Delivery]] = {}
         self._pending: dict[str, list[tuple[Delivery, int]]] = {}
+        self._groups: set[str] = set()
         self._next = 0
+
+    async def ensure_group(self, stream: str) -> None:
+        self._groups.add(stream)
 
     async def enqueue(self, stream: str, job_id: int) -> None:
         _check_id(job_id)
@@ -119,6 +125,13 @@ class FakeJobQueue:
         self._ready.setdefault(stream, []).append(Delivery(f"{self._next}-0", job_id))
 
     async def claim(self, stream: str, consumer: str, count: int) -> list[Delivery]:
+        # Real Redis answers NOGROUP if XGROUP CREATE never ran, so a worker that forgets
+        # ensure_group would pass every test against a permissive fake and then crash on
+        # its first message in production. The fake models the failure, not just the
+        # success -- a fake that only agrees where the real thing agrees is a trap.
+        if stream not in self._groups:
+            raise RuntimeError(f"no consumer group on {stream}; call ensure_group first")
+
         ready = self._ready.get(stream, [])
         taken, self._ready[stream] = ready[:count], ready[count:]
         self._pending.setdefault(stream, []).extend((d, 0) for d in taken)
