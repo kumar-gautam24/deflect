@@ -25,6 +25,14 @@ def upgrade() -> None:
     )
     op.execute("UPDATE eval_runs SET items_total = item_count")
 
+    # The server defaults existed only to make the columns NOT NULL while backfilling.
+    # Left in place, status would default to 'complete' at the database level while the
+    # model defaults to 'running', so any insert bypassing the ORM -- raw SQL, Core
+    # insert(), a future admin script -- would silently create a run that claims to be
+    # finished before it starts.
+    op.alter_column("eval_runs", "status", server_default=None)
+    op.alter_column("eval_runs", "items_total", server_default=None)
+
     # A duplicate pair would make the constraint fail to build. None exist in the
     # development database -- the old runner wrote each item once -- but a migration that
     # dies on real data somewhere else is worse than one that says what it removed.
