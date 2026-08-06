@@ -75,6 +75,11 @@ class AnswerResponse(BaseModel):
     min_margin: float
 
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
 class RunEvalsRequest(BaseModel):
     limit: int | None = None
     # Removed: a run is submitted before anything is scored, so there is no
