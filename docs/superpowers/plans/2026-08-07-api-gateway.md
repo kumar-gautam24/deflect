@@ -661,9 +661,11 @@ def build_upstream() -> FastAPI:
 `services/gateway/tests/test_proxy.py`:
 
 ```python
+import asyncio
+
 import httpx
-import pytest
 import pytest_asyncio
+import uvicorn
 from doubles import build_upstream
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
@@ -742,12 +744,65 @@ async def test_a_client_supplied_deflect_header_never_reaches_the_upstream(gatew
     assert "x-deflect-principal" not in upstream.state.seen_headers
 
 
-async def test_a_streamed_response_is_not_buffered(gateway, upstream):
+async def _serve(app) -> tuple[uvicorn.Server, asyncio.Task, str]:
+    """Run an app on a real socket on an ephemeral port."""
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
+    task = asyncio.create_task(server.serve())
+    while not server.started:
+        await asyncio.sleep(0.01)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    return server, task, f"http://127.0.0.1:{port}"
+
+
+async def _stop(server: uvicorn.Server, task: asyncio.Task) -> None:
+    server.should_exit = True
+    await task
+
+
+@pytest_asyncio.fixture
+async def live_pair():
+    """A real upstream and a real gateway, each on its own ephemeral port.
+
+    ASGITransport cannot prove anything about buffering. It drives the whole ASGI app to
+    completion and collects the body BEFORE send() returns, so a test that waits for a
+    first frame before releasing the upstream deadlocks against the transport rather than
+    against the gateway -- and would deadlock identically whether or not the gateway
+    buffers, which makes it worthless as evidence.
+
+    This is the same limitation that made the uvicorn forwarded-header defect untestable
+    in-process: an in-process transport is not HTTP, and the two places this project
+    genuinely depends on HTTP behaviour both need a socket.
+    """
+    upstream_app = build_upstream()
+    upstream_server, upstream_task, upstream_url = await _serve(upstream_app)
+
+    client = AsyncClient(base_url=upstream_url)
+    gateway_app = FastAPI()
+
+    async def handler(request: Request):
+        return await forward(STREAM, request, upstream_url, client)
+
+    gateway_app.add_api_route("/slow-stream", handler, methods=["GET"])
+    gateway_server, gateway_task, gateway_url = await _serve(gateway_app)
+
+    yield upstream_app, gateway_url
+
+    await client.aclose()
+    await _stop(gateway_server, gateway_task)
+    await _stop(upstream_server, upstream_task)
+
+
+async def test_a_streamed_response_is_not_buffered(live_pair):
     """The failure mode a naive proxy has by default, invisible until a user waits thirty
-    seconds for a first token. The upstream blocks after one frame, so receiving that
-    frame proves the gateway did not wait for the whole body."""
-    transport = ASGITransport(app=gateway)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    seconds for a first token.
+
+    The upstream emits one frame and then blocks until this test releases it. Receiving
+    that frame therefore proves the gateway forwarded it without waiting for the body to
+    finish -- and if the gateway buffered, this test would time out rather than pass.
+    """
+    upstream_app, gateway_url = live_pair
+
+    async with AsyncClient(base_url=gateway_url, timeout=10) as c:
         async with c.stream("GET", "/slow-stream") as response:
             first = None
             async for chunk in response.aiter_bytes():
@@ -755,7 +810,7 @@ async def test_a_streamed_response_is_not_buffered(gateway, upstream):
                 break
 
             assert first is not None and b"first" in first
-            upstream.state.release.set()
+            upstream_app.state.release.set()
 
 
 def test_hop_by_hop_headers_are_dropped():
@@ -777,6 +832,8 @@ def test_the_host_header_is_dropped():
 ```
 
 The two upstream-failure tests need their own app rather than the shared `gateway` fixture, so they are added in Step 5 once `forward` exists. Everything above uses the fixture.
+
+**Note the split, and do not collapse it.** Every test except the streaming one runs in-process through `ASGITransport`, which is fast and sufficient for headers, status and body. The streaming test alone runs over real sockets, because `ASGITransport` drives the whole app to completion before `send()` returns — an in-process no-buffering test deadlocks against the transport and proves nothing either way. Verified empirically against httpx 0.28.1 before this plan was written.
 
 - [ ] **Step 3: Run to verify failure**
 
