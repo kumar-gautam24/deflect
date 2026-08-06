@@ -38,3 +38,13 @@ def test_verifying_against_a_malformed_hash_is_false_rather_than_an_error():
 def test_verifying_without_a_stored_hash_is_false(empty):
     """An account with no password set must never authenticate."""
     assert verify_password("x", empty) is False
+
+
+def test_a_fresh_hash_does_not_need_rehashing():
+    assert needs_rehash(hash_password("x")) is False
+
+
+def test_a_malformed_hash_is_treated_as_needing_one():
+    """Login calls this after verifying. Reporting False for an unreadable hash would
+    leave a broken row broken forever; True lets the next successful login replace it."""
+    assert needs_rehash("not-a-hash") is True
