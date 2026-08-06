@@ -401,7 +401,7 @@ for s in retrieval answer evals; do (cd services/$s && uv run pytest -q); done
 cd apps/web && npm test
 ```
 
-161 service tests (49 retrieval, 61 answer, 51 evals), 48 for the shared contracts, and
+202 service tests (64 retrieval, 61 answer, 77 evals), 63 for the shared contracts, and
 24 component tests. Each service's suite runs against its own test
 database and needs nothing else: the answer service's tests use a fake retrieval, and
 the eval service's tests use a fake answer service, so neither needs a vector database,
