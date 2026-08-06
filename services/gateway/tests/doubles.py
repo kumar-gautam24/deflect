@@ -13,11 +13,24 @@ from fastapi.responses import JSONResponse, StreamingResponse
 def build_upstream() -> FastAPI:
     app = FastAPI()
     app.state.seen_headers = {}
+    app.state.seen_paths = []
     app.state.release = asyncio.Event()
+
+    @app.middleware("http")
+    async def record(request: Request, call_next):
+        """Record EVERY request, not only the ones this double has a route for.
+
+        Recording inside a handler can only ever see paths the double defines, so a test
+        asserting "the upstream was never called" would pass identically when the upstream
+        WAS called on a path it happens not to serve -- which is exactly the regression
+        those tests exist to catch.
+        """
+        app.state.seen_paths.append(request.url.path)
+        app.state.seen_headers = dict(request.headers)
+        return await call_next(request)
 
     @app.api_route("/echo", methods=["GET", "POST"])
     async def echo(request: Request) -> JSONResponse:
-        app.state.seen_headers = dict(request.headers)
         body = await request.body()
         return JSONResponse(
             {

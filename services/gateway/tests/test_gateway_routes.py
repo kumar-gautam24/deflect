@@ -45,19 +45,21 @@ async def test_metrics_never_reaches_an_upstream(app, upstream):
     The gateway's own /metrics is a separate route; what must never happen is a proxied
     request to a service's /metrics.
 
-    Asserted by proving the fake upstream was never called, not by inspecting the response
-    body -- a substring check there collides with the gateway's own metric names.
+    Asserted on the upstream's record of every path it was asked for, not on the response
+    body -- a substring check there collides with the gateway's own metric names, and
+    seen_headers alone would be vacuous because the double only sets it for paths it
+    actually serves.
     """
     await call(app, "GET", "/metrics", headers=SERVICE)
 
-    assert upstream.state.seen_headers == {}
+    assert upstream.state.seen_paths == []
 
 
 async def test_an_unknown_path_is_a_404_before_any_upstream_call(app, upstream):
     response = await call(app, "GET", "/nope", headers=OPERATOR)
 
     assert response.status_code == 404
-    assert upstream.state.seen_headers == {}
+    assert upstream.state.seen_paths == []
 
 
 async def test_an_upstream_docs_path_is_not_routed(app, upstream):
@@ -71,7 +73,7 @@ async def test_an_upstream_docs_path_is_not_routed(app, upstream):
     for path in ["/redoc", "/openapi.json"]:
         await call(app, "GET", path, headers=OPERATOR)
 
-    assert upstream.state.seen_headers == {}
+    assert upstream.state.seen_paths == []
 
 
 async def test_a_guarded_route_refuses_a_missing_credential(app):
