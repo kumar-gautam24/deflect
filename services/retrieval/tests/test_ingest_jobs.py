@@ -64,3 +64,13 @@ async def test_job_status_requires_an_operator_credential(session, queue):
 
 async def test_an_unknown_job_is_a_404(session, queue):
     assert (await request("GET", "/jobs/999999", OPERATOR)).status_code == 404
+
+
+async def test_the_event_stream_404s_for_an_unknown_job(session, queue):
+    """The sibling route 404s. A 200 carrying an error frame would make the two disagree
+    about what missing looks like."""
+    assert (await request("GET", "/jobs/999999/events", OPERATOR)).status_code == 404
+
+
+async def test_the_event_stream_requires_an_operator_credential(session, queue):
+    assert (await request("GET", "/jobs/1/events")).status_code == 401

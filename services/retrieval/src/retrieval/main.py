@@ -13,7 +13,7 @@ from deflect_common.schemas import (
     SearchRequest,
     SearchResponse,
 )
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
 
@@ -151,20 +151,36 @@ async def job_status(job_id: int, session: SessionDep) -> dict:
 
 
 @app.get("/jobs/{job_id}/events", dependencies=[Depends(require_operator)])
-async def job_events(job_id: int, session: SessionDep) -> StreamingResponse:
+async def job_events(
+    job_id: int, http: Request, session: SessionDep
+) -> StreamingResponse:
     """Progress as SSE, closing once the job reaches a terminal state.
 
     Polled from the database rather than subscribed from Redis: the database is the
     source of truth, and a stream fed from the broker would disagree with /jobs/{id}
     the moment a message was redelivered.
     """
+    # Resolved before streaming starts, so an unknown id is a 404 like everywhere else.
+    # Reporting it as a 200 carrying an error frame would make the two job routes
+    # disagree about what "missing" looks like.
+    if await session.get(IngestJob, job_id) is None:
+        raise HTTPException(status_code=404, detail=f"job {job_id} not found")
 
     async def stream() -> AsyncIterator[str]:
         while True:
-            await session.refresh(job) if (job := await session.get(IngestJob, job_id)) else None
-            if job is None:
-                yield f"data: {json.dumps({'error': 'not found'})}\n\n"
+            # A closed connection must end the loop. Without this an abandoned stream
+            # holds a database session for the whole life of the job -- two hours, for
+            # the runs this system exists to watch.
+            if await http.is_disconnected():
                 return
+
+            job = await session.get(IngestJob, job_id)
+            if job is None:
+                return
+            # The identity map would otherwise hand back the row as it looked on the
+            # first pass, and the stream would report "queued" forever.
+            await session.refresh(job)
+
             yield f"data: {json.dumps(_job_payload(job))}\n\n"
             if job.status in ("done", "failed"):
                 return
