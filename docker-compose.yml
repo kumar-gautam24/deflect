@@ -51,6 +51,7 @@ services:
       dockerfile: services/answer/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_answer
+      REDIS_URL: redis://redis:6379/0
       RETRIEVAL_URL: http://retrieval:8001
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -62,6 +63,8 @@ services:
     ports: ["${ANSWER_PORT:-8002}:8002"]
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       retrieval:
         condition: service_started
@@ -90,6 +93,23 @@ services:
         condition: service_healthy
       answer:
         condition: service_started
+
+  auth:
+    build:
+      context: .
+      dockerfile: services/auth/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_auth
+      REDIS_URL: redis://redis:6379/0
+      ENV: ${ENV:-development}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
+    ports: ["${AUTH_PORT:-8004}:8004"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 
   # Workers run the images already built, with a different command. Each needs its own

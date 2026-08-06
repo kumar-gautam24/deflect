@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [retrieval, answer, evals]
+        service: [retrieval, answer, evals, auth]
     services:
       db:
         image: pgvector/pgvector:pg16

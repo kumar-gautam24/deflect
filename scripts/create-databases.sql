@@ -4,7 +4,9 @@
 CREATE DATABASE deflect_retrieval;
 CREATE DATABASE deflect_answer;
 CREATE DATABASE deflect_evals;
+CREATE DATABASE deflect_auth;
 
 CREATE DATABASE deflect_retrieval_test;
 CREATE DATABASE deflect_answer_test;
 CREATE DATABASE deflect_evals_test;
+CREATE DATABASE deflect_auth_test;

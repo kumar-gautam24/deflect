@@ -36,6 +36,8 @@ services:
     envVars:
       - key: DATABASE_URL
         sync: false
+      - key: REDIS_URL
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: GROQ_API_KEY
@@ -74,6 +76,28 @@ services:
       - key: GROQ_API_KEY
         sync: false
       - key: ANSWER_URL
+        sync: false
+      # Both services on a call must carry the same SERVICE_TOKEN, so these are set
+      # by hand rather than with generateValue, which would mint a different one each.
+      - key: SERVICE_TOKEN
+        sync: false
+      - key: OPERATOR_TOKEN
+        sync: false
+      - key: ENV
+        sync: false
+
+  - type: web
+    name: deflect-auth
+    runtime: docker
+    dockerfilePath: ./services/auth/Dockerfile
+    dockerContext: .
+    # Readiness, not liveness: this decides whether a deploy can serve traffic,
+    # not merely whether its process exists.
+    healthCheckPath: /ready
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
         sync: false
       # Both services on a call must carry the same SERVICE_TOKEN, so these are set
       # by hand rather than with generateValue, which would mint a different one each.
@@ -141,6 +165,6 @@ services:
 # history, which is why a small instance is enough.
 services_note: |
   Create a Render Key Value instance and set its connection string as REDIS_URL on
-  deflect-retrieval, deflect-evals and both workers. It is declared here as a note rather
-  than a service block because Render provisions key-value stores outside the services
-  list.
+  deflect-retrieval, deflect-answer, deflect-evals, deflect-auth and both workers. It is
+  declared here as a note rather than a service block because Render provisions key-value
+  stores outside the services list.

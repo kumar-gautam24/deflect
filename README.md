@@ -256,9 +256,11 @@ version had failed twice in practice, not because a diagram looked better with o
 | retrieval | `GET /jobs/{job_id}`, `/jobs/{job_id}/events` | operator |
 | answer | `POST /ask` | public, rate limited |
 | answer | `POST /answer` | service |
-| answer | `GET /traces`, `GET /traces/{id}` | operator |
+| answer | `GET /traces`, `GET /traces/{id}` | viewer |
 | evals | `POST /runs` | operator — returns `202` |
 | evals | `GET /eval-runs`, `/eval-runs/diff`, `/eval-runs/{id}`, `/eval-runs/{id}/events` | public |
+| auth | `POST /auth/login` | public, rate limited |
+| auth | `POST /auth/logout`, `/auth/logout-all`, `GET /auth/me` | valid session |
 
 Two static bearer tokens carried in the environment, enforced by one dependency in
 `packages/common`. An API-key table with per-caller revocation would have needed either a
@@ -275,6 +277,23 @@ daily cap counted from `traces` bounds the provider bill. Only the second of tho
 spend bound -- a botnet has many real addresses -- and the two are sized together: 20 an
 hour over 24 hours is 480, just under the 500 daily ceiling, so no single address can
 exhaust a day's budget.
+
+### Who did this
+
+Two shared tokens answer whether a caller is allowed. They cannot answer who, which is the
+question that matters as soon as more than one person can trigger an ingest or an eval run.
+
+An `auth` service issues opaque sessions — 32 random bytes, stored only as a SHA-256, so a
+dump of its database yields nothing replayable. Services read those sessions from Redis
+rather than calling auth, so none of them depends on auth being reachable to serve its own
+data; the cost is that revocation is bounded by the cache TTL rather than instant, which is
+why that TTL is five minutes.
+
+Two roles draw the line that exists in this system: a **viewer** can read traces and eval
+runs, an **admin** can also spend two hours of provider quota by starting a run.
+
+Accounts are created with `python -m auth.cli create-admin --email you@example.com`. There
+is no signup route: this system has operators, not users.
 
 ## Evals
 
@@ -352,9 +371,9 @@ npm run dev
    between services; set each `DATABASE_URL` (Neon pooled string, with the
    `postgresql+asyncpg://` prefix), `GROQ_API_KEY`, `WEB_ORIGIN`, `ENV=production`,
    `SERVICE_TOKEN`, and
-   `OPERATOR_TOKEN`. The same `SERVICE_TOKEN` must be given to all three services, since
+   `OPERATOR_TOKEN`. The same `SERVICE_TOKEN` must be given to all four services, since
    each one both presents it and checks it on incoming calls.
-3. **Vercel** — deploy `apps/web` with `ANSWER_URL` and `EVALS_URL` set to the
+3. **Vercel** — deploy `apps/web` with `ANSWER_URL`, `EVALS_URL` and `AUTH_URL` set to the
    corresponding Render URLs, plus `OPERATOR_TOKEN` and `SERVICE_TOKEN`.
 
 `WEB_ORIGIN` is what the answer service's CORS allowlist reads, so the deployed
@@ -396,13 +415,13 @@ Containers run as a non-root user and pin their base image by digest.
 ### Tests
 
 ```bash
-for s in retrieval answer evals; do (cd services/$s && uv run pytest -q); done
+for s in retrieval answer evals auth; do (cd services/$s && uv run pytest -q); done
 (cd packages/common && uv run pytest -q)
 cd apps/web && npm test
 ```
 
-204 service tests (65 retrieval, 61 answer, 78 evals), 63 for the shared contracts, and
-24 component tests. Each service's suite runs against its own test
+245 service tests (70 retrieval, 54 answer, 82 evals, 39 auth), 90 for the shared
+contracts, and 21 component tests. Each service's suite runs against its own test
 database and needs nothing else: the answer service's tests use a fake retrieval, and
 the eval service's tests use a fake answer service, so neither needs a vector database,
 an embedding model or a provider key. That isolation is a direct benefit of the split.
