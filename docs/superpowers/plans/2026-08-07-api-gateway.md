@@ -721,18 +721,6 @@ async def test_the_body_survives(gateway):
     assert response.json()["body"] == '{"a":1}'
 
 
-async def test_an_upstream_error_is_relayed_not_replaced(gateway, upstream):
-    """A 418 from a service is that service's answer. Replacing it with 502 would hide a
-    real response behind a transport error."""
-    gateway.add_api_route(
-        "/boom",
-        lambda request: forward(Route("GET", "/boom", "answer", None, timeout=5), request,
-                                "http://upstream", request.app.state.client),
-        methods=["GET"],
-    )
-    # The route above needs the client on app.state; simpler path is asserted below.
-
-
 async def test_the_callers_authorization_is_passed_through_unchanged(gateway, upstream):
     """The gateway must not swap in its own token: the upstream re-resolves the caller,
     and that is the whole defence-in-depth argument."""
@@ -788,7 +776,7 @@ def test_the_host_header_is_dropped():
     assert "host" not in cleaned
 ```
 
-Delete `test_an_upstream_error_is_relayed_not_replaced` — it is superseded by the cleaner version added in Step 4. It is listed here only so the plan's reader sees why it was dropped rather than wondering where it went.
+The two upstream-failure tests need their own app rather than the shared `gateway` fixture, so they are added in Step 5 once `forward` exists. Everything above uses the fixture.
 
 - [ ] **Step 3: Run to verify failure**
 
@@ -904,9 +892,9 @@ async def forward(
     )
 ```
 
-- [ ] **Step 5: Replace the placeholder error test**
+- [ ] **Step 5: Add the two upstream-failure tests**
 
-In `tests/test_proxy.py`, delete `test_an_upstream_error_is_relayed_not_replaced` and add:
+Append to `tests/test_proxy.py`:
 
 ```python
 async def test_an_upstream_error_status_is_relayed_rather_than_replaced(upstream):
