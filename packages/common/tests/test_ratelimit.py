@@ -1,8 +1,11 @@
 from datetime import UTC, datetime
 
+from fastapi import Request
+
 from deflect_common.ratelimit import (
     SlidingWindowLimiter,
     client_address,
+    edge_address,
     seconds_until_utc_midnight,
 )
 
@@ -98,3 +101,72 @@ def test_seconds_until_midnight_is_a_full_day_at_midnight():
     now = datetime(2026, 8, 5, 0, 0, 0, tzinfo=UTC)
 
     assert seconds_until_utc_midnight(now) == 86_400
+
+
+def _request(headers: dict[str, str], peer: str | None = "10.0.0.1") -> Request:
+    """A Starlette request with the given headers and peer, without a server."""
+    raw = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": raw,
+        "client": (peer, 1234) if peer else None,
+    }
+    return Request(scope)
+
+
+def test_the_edge_takes_the_entry_its_own_proxy_appended():
+    """Render appends the real client to whatever the caller sent, so the LAST entry is
+    the only one the gateway's own proxy wrote."""
+    request = _request({"X-Forwarded-For": "203.0.113.7"})
+
+    assert edge_address(request) == "203.0.113.7"
+
+
+def test_a_spoofed_leading_entry_is_ignored():
+    """The whole point. A caller who sends their own X-Forwarded-For would otherwise mint
+    a fresh rate-limit key per request and make the limit decorative."""
+    request = _request({"X-Forwarded-For": "9.9.9.9, 203.0.113.7"})
+
+    assert edge_address(request) == "203.0.113.7"
+
+
+def test_many_spoofed_entries_are_still_ignored():
+    request = _request({"X-Forwarded-For": "1.1.1.1, 2.2.2.2, 3.3.3.3, 203.0.113.7"})
+
+    assert edge_address(request) == "203.0.113.7"
+
+
+def test_two_trusted_hops_takes_the_second_from_the_right():
+    """A deployment behind two proxies needs a different number, not different code."""
+    request = _request({"X-Forwarded-For": "9.9.9.9, 203.0.113.7, 10.0.0.9"})
+
+    assert edge_address(request, trusted_hops=2) == "203.0.113.7"
+
+
+def test_no_forwarded_header_falls_back_to_the_peer():
+    """Direct connections happen in development, and must not all share one key."""
+    request = _request({}, peer="192.168.1.5")
+
+    assert edge_address(request) == "192.168.1.5"
+
+
+def test_fewer_entries_than_trusted_hops_falls_back_to_the_peer():
+    """A header too short to contain a trusted entry is not evidence of anything, so it
+    must not be believed."""
+    request = _request({"X-Forwarded-For": "9.9.9.9"}, peer="192.168.1.5")
+
+    assert edge_address(request, trusted_hops=2) == "192.168.1.5"
+
+
+def test_no_peer_and_no_header_is_a_single_known_bucket():
+    request = _request({}, peer=None)
+
+    assert edge_address(request) == "unknown"
+
+
+def test_whitespace_and_empty_entries_do_not_shift_the_answer():
+    request = _request({"X-Forwarded-For": "9.9.9.9 , , 203.0.113.7 "})
+
+    assert edge_address(request) == "203.0.113.7"

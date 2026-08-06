@@ -81,3 +81,28 @@ def seconds_until_utc_midnight(now: datetime) -> int:
         hour=0, minute=0, second=0, microsecond=0
     )
     return int((midnight - now.astimezone(UTC)).total_seconds())
+
+
+def edge_address(request: Request, trusted_hops: int = 1) -> str:
+    """The client address, for a service that IS the edge.
+
+    `client_address` takes the leftmost X-Forwarded-For entry, which is right when the only
+    forwarder is trusted and overwrites the header -- the web BFF does exactly that. It is
+    wrong here. A load balancer in front of a public edge APPENDS the real client to
+    whatever the caller sent, so the leftmost entry is attacker-supplied and the rightmost
+    is the one our own proxy wrote.
+
+    Two functions rather than another boolean on one: the rules are genuinely different,
+    and a flag would invite a future caller to pick the wrong one and never find out.
+
+    `trusted_hops` is explicit because the right entry is n-from-the-right. A deployment
+    behind two proxies needs a different number, not different code. If the header is too
+    short to hold that many, it is not evidence of anything and the peer is used instead.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    entries = [entry.strip() for entry in forwarded.split(",") if entry.strip()]
+
+    if len(entries) >= trusted_hops >= 1:
+        return entries[-trusted_hops]
+
+    return request.client.host if request.client else "unknown"
