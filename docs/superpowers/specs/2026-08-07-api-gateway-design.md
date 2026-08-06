@@ -36,6 +36,7 @@ this is not a response to an incident, and the README must not imply that it is.
 | gateway state | Redis only, no database | The gateway owns no data. Giving it a database to satisfy a pattern would break "database per service" by inverting it — the rule is that a service owning data owns its database, not that every service has one. |
 | where `apps/web` sits | BFF stays, retargeted at the gateway | The session cookie is httpOnly on the web origin, so something must translate cookie to Bearer. Doing it in the BFF avoids cross-origin credentialed requests between a Vercel domain and a Render one, and keeps a token out of the browser. |
 | route configuration | a declarative table | Decorators scattered across modules make the security posture something you assemble by reading. A table makes it something you read. |
+| limiter algorithm | GCRA leaky bucket, replacing the sliding-window log | A sliding-window log is exact but stores one entry per request and permits the whole allowance in a single burst — 20 questions in one second, then an hour of nothing. GCRA holds one float per key, smooths the burst to a tunable depth, and yields a truthful `Retry-After` as a by-product. **This changes observable behaviour and is therefore its own decision, not part of the relocation.** |
 
 ## Architecture
 
@@ -60,7 +61,7 @@ Four modules, each with one job and testable alone:
 | --- | --- | --- |
 | `routes.py` | the route table: path, method, upstream, required principal, timeout, streaming | nothing |
 | `proxy.py` | streaming passthrough over httpx, header hygiene | `routes` |
-| `limits.py` | Redis sliding window keyed by client address | `redis` |
+| `limits.py` | GCRA leaky bucket keyed by client address | `redis` |
 | `principal.py` | coarse allow/deny, then forward the credential untouched | `deflect_common.auth` |
 
 Keeping `routes.py` dependency-free is deliberate: the table is the artifact a reviewer reads
@@ -89,13 +90,16 @@ Route("GET",  "/eval-runs/{id}",    evals,     principal=None,       timeout=15)
 Route("GET",  "/eval-runs/{id}/events", evals, principal=None,                   stream=True)
 ```
 
-`ASK` and `LOGIN` are the limits the services enforce today, moved unchanged so the migration
-alters where a rule lives without altering the rule: 20 per hour per address for `/ask`
+`ASK` and `LOGIN` carry the **sustained rates** the services enforce today, so relocating
+them changes where a rule lives and not how much traffic it permits per hour: 20 per hour
+per address for `/ask`
 (`answer`'s `ask_rate_limit_per_hour`, which stays settings-driven because it is the one
 number an operator may want to turn down under load), and 60 per hour for login
 (`auth.policy.Policy.LOGIN_ATTEMPTS_PER_HOUR`, a constant because it is sized against the
-lockout and the two must be reasoned about together). The circuit-breaker numbers join the
-latter in a gateway `policy.py`, each with the reason it has that value.
+lockout and the two must be reasoned about together). Their **burst depths** are new, and are
+set under "Rate limiting" below — that is the one dimension the move deliberately changes.
+The circuit-breaker numbers join them in a gateway `policy.py`, each with the reason it has
+that value.
 
 Note what does **not** move with them: `answer` keeps `ask_daily_limit` (500) and the
 `questions_today` query behind it. The hourly window and the daily cap were deliberately
@@ -173,10 +177,52 @@ count. That is documented and tolerable while `answer` and `auth` are pinned to 
 at the edge it stops being tolerable, because the gateway is the service most likely to need
 more than one.
 
-A `RedisSlidingWindowLimiter` joins it in `packages/common`, backed by a sorted set — one
-pipelined `ZREMRANGEBYSCORE` + `ZCARD` + `ZADD` + `EXPIRE` per check. The in-memory
-implementation stays for tests and for single-worker use; both satisfy the same protocol, the
-way `SessionStore` already has a real and a fake implementation.
+The algorithm also changes, and that is a separate decision from the move.
+
+A sliding-window **log** is exact, but it stores one entry per request and it lets the entire
+allowance be spent at once: twenty questions in the first second, then an hour of refusals.
+That neither smooths load on the provider nor resembles what trying a demo looks like. It
+also cannot say when the caller may return — which is why `answer/main.py` and
+`auth/main.py` both hardcode `Retry-After: 3600` today, telling a caller one second over the
+limit to wait a full hour. That header is wrong on `main` now, independent of this work, and
+is fixed here rather than separately because the correct value only exists once the limiter
+can compute it.
+
+**GCRA** — leaky bucket in its virtual-scheduling form, the algorithm behind `redis-cell` —
+fixes all three:
+
+```
+emission_interval = period / rate            # 3600/20 = 180s per question
+tau               = emission * (burst - 1)   # how much burst is tolerated
+
+tat     = max(stored_tat, now)               # theoretical arrival time
+new_tat = tat + emission_interval
+allowed = (new_tat - tau) <= now
+retry_after = new_tat - tau - now            # honest, and free
+```
+
+One float per key rather than one sorted-set member per request, and a single Lua script, so
+the check is atomic without a pipeline round trip.
+
+```python
+class Limiter(Protocol):
+    def check(self, key: str, now: float) -> Decision: ...
+
+Decision(allowed: bool, retry_after: float)
+```
+
+`InMemoryGCRA` and `RedisGCRA` both satisfy it, the way `SessionStore` already has a real and
+a fake implementation — the in-memory one for tests and single-worker use.
+
+**Tuning.** `/ask` becomes rate 20/hour with burst 5; login becomes rate 60/hour with burst
+10. The burst depth is the number that matters: a visitor asking five questions back to back
+is using the demo, not abusing it, and the previous behaviour allowed twenty at once anyway.
+The sustained rate is unchanged, so the relationship with the daily cap below still holds.
+
+**Sequencing.** These are two commits, not one. The limiter moves to the gateway first with
+its current sliding-window semantics intact, and the algorithm is swapped second. A
+behaviour regression is then attributable to one change rather than to a relocation and a
+rewrite that happened together.
 
 Limits move as follows:
 
@@ -197,7 +243,7 @@ correctness, which must hold everywhere.*
 | --- | --- | --- |
 | upstream unreachable | 502 | Distinct from an upstream that answered with an error, which is relayed as-is. |
 | upstream exceeds route timeout | 504 | A gateway that hangs converts one slow service into an exhausted edge. |
-| rate limit exceeded | 429 + `Retry-After` | Same shape the services return today, so no client changes. |
+| rate limit exceeded | 429 + `Retry-After` | Same shape the services return today, so no client changes — but the value is now computed from the limiter rather than hardcoded to the full period. |
 | path not in the table | 404 | Refused before any upstream call. |
 | upstream failing repeatedly | 503, fail fast | A circuit breaker: after 5 consecutive failures, stop dialling that upstream for 30 seconds. Without it every gateway worker ends up blocked on the same sick service. The numbers are a starting point and belong in a policy module with their reasoning, the way `auth/policy.py` already does it. |
 
@@ -219,6 +265,14 @@ The route table is data, so the important tests are table-driven and cheap:
   waits thirty seconds for a first token.
 - **A spoofed leftmost `X-Forwarded-For` does not change the rate-limit key.** The direct
   regression test for the section above.
+- **The limiter's burst and drain behaviour.** That `burst` requests succeed back to back,
+  that the next one is refused, and that after `emission_interval` exactly one more is
+  allowed. `now` is already a parameter on the existing limiter, so this needs no sleeping.
+- **`Retry-After` is truthful.** Waiting the advertised interval must let the next request
+  through. This is the test the current hardcoded value could never have passed.
+- **The two implementations agree.** `InMemoryGCRA` and `RedisGCRA` are driven through the
+  same sequence of calls and must return the same decisions, so the fake used in tests cannot
+  drift from the real one.
 - **Header hygiene.** A client-supplied `X-Forwarded-For` or `X-Deflect-*` never reaches the
   upstream.
 - **Credential passthrough.** The upstream receives the caller's original `Authorization`
@@ -289,6 +343,7 @@ where the answer lives.
 ## Open questions
 
 1. Does the Render plan support Private Services? First thing to verify; the spec covers both.
-2. Does the gateway need more than one worker? If the private split lands and traffic stays at
-   demo levels, one worker keeps the in-memory limiter viable and the Redis limiter could be
-   deferred. Decide with a measurement, not in advance.
+2. Does the gateway need more than one worker? At demo traffic one worker would keep
+   `InMemoryGCRA` viable and let `RedisGCRA` be deferred. Decide with a measurement rather
+   than in advance — but note the shared-state version is what makes the worker count a free
+   choice later, which is an argument for building it once rather than twice.
