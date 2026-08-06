@@ -5,7 +5,7 @@ import them from here, so a change to a contract is a single edit that breaks
 compilation on both sides rather than a silent mismatch discovered at runtime.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class Hit(BaseModel):
