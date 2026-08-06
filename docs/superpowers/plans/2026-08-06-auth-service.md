@@ -613,7 +613,20 @@ def test_verifying_against_a_malformed_hash_is_false_rather_than_an_error():
 def test_verifying_without_a_stored_hash_is_false(empty):
     """An account with no password set must never authenticate."""
     assert verify_password("x", empty) is False
+
+
+def test_a_fresh_hash_does_not_need_rehashing():
+    assert needs_rehash(hash_password("x")) is False
+
+
+def test_a_malformed_hash_is_treated_as_needing_one():
+    """Login calls this after verifying. Reporting False for an unreadable hash would
+    leave a broken row broken forever; True lets the next successful login replace it."""
+    assert needs_rehash("not-a-hash") is True
 ```
+
+Note the parametrized case collects as **two** items, so this file is **10 tests**, not the
+eight functions it appears to declare.
 
 - [ ] **Step 3: Run them to verify they fail**
 
@@ -904,7 +917,7 @@ DATABASE_URL="postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_auth_t
 DATABASE_URL="postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_auth" uv run alembic upgrade head
 uv run pytest -q && uv run ruff check .
 ```
-Expected: 10 passed (7 password, 3 model).
+Expected: 13 passed — 10 from `test_passwords.py` (8 functions, one of them parametrized into two) and 3 from `test_models.py`.
 
 - [ ] **Step 9: Commit**
 
@@ -1295,7 +1308,7 @@ Create `services/auth/tests/test_routes.py` covering: a correct login returns 20
 ```bash
 cd services/auth && uv run pytest -q && uv run ruff check .
 ```
-Expected: 10 from Task 2, 11 login, and the route tests. Report the real count.
+Expected: 13 from Task 2, 11 login, and the route tests. Report the real count.
 
 - [ ] **Step 7: Commit**
 
