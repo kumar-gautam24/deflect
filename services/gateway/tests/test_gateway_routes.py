@@ -20,8 +20,12 @@ async def store():
 
 
 @pytest_asyncio.fixture
-async def app(store):
-    upstream = build_upstream()
+async def upstream():
+    return build_upstream()
+
+
+@pytest_asyncio.fixture
+async def app(store, upstream):
     client = AsyncClient(transport=ASGITransport(app=upstream), base_url="http://upstream")
     gateway_app.dependency_overrides[build_sessions] = lambda: store
     gateway_app.dependency_overrides[build_client] = lambda: client
@@ -36,27 +40,38 @@ async def call(app, method: str, path: str, **kwargs) -> httpx.Response:
         return await c.request(method, path, **kwargs)
 
 
-async def test_metrics_is_not_routable_to_an_upstream(app):
-    """It is absent from the table, so it cannot be reached even by a caller holding the
-    right token. The gateway's own /metrics is a different route, added below."""
-    response = await call(app, "GET", "/metrics", headers=SERVICE)
+async def test_metrics_never_reaches_an_upstream(app, upstream):
+    """/metrics is absent from the route table, so it is unroutable rather than guarded.
+    The gateway's own /metrics is a separate route; what must never happen is a proxied
+    request to a service's /metrics.
 
-    assert response.status_code in (200, 401)
-    # 200 only from the gateway's OWN metrics; never a proxied upstream body.
-    assert "path" not in response.text
+    Asserted by proving the fake upstream was never called, not by inspecting the response
+    body -- a substring check there collides with the gateway's own metric names.
+    """
+    await call(app, "GET", "/metrics", headers=SERVICE)
+
+    assert upstream.state.seen_headers == {}
 
 
-async def test_an_unknown_path_is_a_404_before_any_upstream_call(app):
+async def test_an_unknown_path_is_a_404_before_any_upstream_call(app, upstream):
     response = await call(app, "GET", "/nope", headers=OPERATOR)
 
     assert response.status_code == 404
+    assert upstream.state.seen_headers == {}
 
 
-async def test_an_upstream_docs_path_is_not_routed(app):
+async def test_an_upstream_docs_path_is_not_routed(app, upstream):
+    """Same reasoning. /redoc and /openapi.json belong to the gateway's own FastAPI app
+    when ENV is not production, and must never become a proxied request to a service.
+
+    Not asserted on the body: FastAPI puts every handler's docstring into the OpenAPI
+    schema, so any word this codebase uses in a docstring -- "upstream" among them -- will
+    appear in /openapi.json for reasons that have nothing to do with routing.
+    """
     for path in ["/redoc", "/openapi.json"]:
-        response = await call(app, "GET", path, headers=OPERATOR)
-        assert response.status_code in (200, 404)
-        assert "upstream" not in response.text
+        await call(app, "GET", path, headers=OPERATOR)
+
+    assert upstream.state.seen_headers == {}
 
 
 async def test_a_guarded_route_refuses_a_missing_credential(app):
