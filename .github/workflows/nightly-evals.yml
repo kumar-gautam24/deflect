@@ -32,18 +32,50 @@ jobs:
           docker compose exec -T retrieval alembic upgrade head
           docker compose exec -T answer alembic upgrade head
           docker compose exec -T evals alembic upgrade head
+          # Both containers need the corpus: the service validates the path, the
+          # worker is what actually reads it.
           docker compose cp /tmp/fastapi-src/docs/en/docs retrieval:/corpus
-          curl -fsS -X POST localhost:8001/ingest \
+          docker compose cp /tmp/fastapi-src/docs/en/docs retrieval-worker:/corpus
+
+          # Ingest is a job now, so the build waits on the job rather than the request.
+          JOB=$(curl -fsS -X POST localhost:8001/ingest \
             -H 'Content-Type: application/json' \
             -H "Authorization: Bearer ci-operator-token" \
-            -d "{\"root\": \"/corpus\", \"commit_sha\": \"$(git -C /tmp/fastapi-src rev-parse HEAD)\"}"
+            -d "{\"root\": \"/corpus\", \"commit_sha\": \"$(git -C /tmp/fastapi-src rev-parse HEAD)\"}" \
+            | jq -r .job_id)
+
+          for _ in $(seq 1 120); do
+            STATUS=$(curl -fsS "localhost:8001/jobs/$JOB" \
+              -H "Authorization: Bearer ci-operator-token" | jq -r .status)
+            [ "$STATUS" = "done" ] && break
+            [ "$STATUS" = "failed" ] && { echo "ingest failed"; exit 1; }
+            sleep 10
+          done
+          [ "$STATUS" = "done" ] || { echo "ingest did not finish in 20 minutes"; exit 1; }
 
       - name: Full golden dataset
         run: |
-          curl -sf -X POST http://localhost:8003/runs \
+          # fail_under no longer applies at submission -- nothing has been scored yet --
+          # so the build polls the run and applies the threshold itself. The full set is
+          # roughly two hours against a free-tier quota, hence the generous ceiling.
+          RUN=$(curl -fsS -X POST http://localhost:8003/runs \
             -H 'Content-Type: application/json' \
             -H "Authorization: Bearer ci-operator-token" \
-            -d '{"fail_under": 0.85}'
+            -d '{}' | jq -r .run_id)
+
+          for _ in $(seq 1 1080); do
+            STATUS=$(curl -fsS "localhost:8003/eval-runs/$RUN" | jq -r .status)
+            [ "$STATUS" = "complete" ] && break
+            sleep 10
+          done
+          [ "$STATUS" = "complete" ] || { echo "eval run did not finish in 3 hours"; exit 1; }
+
+          SCORE=$(curl -fsS "localhost:8003/eval-runs/$RUN" | jq -r .metrics.faithfulness)
+          SCORED=$(curl -fsS "localhost:8003/eval-runs/$RUN" | jq -r .item_count)
+          TOTAL=$(curl -fsS "localhost:8003/eval-runs/$RUN" | jq -r .items_total)
+          echo "faithfulness $SCORE over $SCORED of $TOTAL items"
+          awk -v s="$SCORE" 'BEGIN { exit (s >= 0.85) ? 0 : 1 }' \
+            || { echo "faithfulness below 0.85"; exit 1; }
 
       - name: Service logs on failure
         if: failure()
