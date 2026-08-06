@@ -228,12 +228,20 @@ async def create_run(request: RunEvalsRequest, session: SessionDep, queue: Queue
     session.add_all(jobs)
     await session.flush()
 
-    # Rows first, then messages, all in one transaction: a failed enqueue rolls the run
-    # back rather than leaving items no worker will ever be told about.
+    # Committed BEFORE enqueueing, not after. A worker blocked on XREADGROUP receives a
+    # message the instant it is added, and if the producing transaction has not committed
+    # yet the worker finds no row -- which it treats as a job whose commit failed, and
+    # acknowledges. One item dropped that way leaves the run short forever, because the
+    # fan-in waits on a count it can never reach.
+    #
+    # The cost of this order is the opposite failure: a committed job with no message,
+    # which is visible as a queued row and can be re-enqueued. A silently dropped job
+    # cannot be seen at all.
+    await session.commit()
+
     for job in jobs:
         await queue.enqueue(EVAL_ITEM_STREAM, job.id)
 
-    await session.commit()
     return {"run_id": run.id}
 
 

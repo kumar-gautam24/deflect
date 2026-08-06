@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 
 from deflect_common.jobs import EVAL_ITEM_STREAM, Delivery, JobQueue, RedisJobQueue
 from deflect_common.llm.base import get_client
-from deflect_common.schemas import AnswerResponse
+from deflect_common.schemas import AnswerResponse, SearchRequest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,7 +29,7 @@ MAX_ATTEMPTS = 3
 # Comfortably longer than one item, which is roughly ninety seconds against a free tier.
 STALE_AFTER_MS = 15 * 60 * 1000
 
-ScoreFn = Callable[[str], Awaitable[tuple[EvalResult, AnswerResponse]]]
+ScoreFn = Callable[[str, "SearchRequest | None"], Awaitable[tuple[EvalResult, AnswerResponse]]]
 
 
 async def _record_provenance(session: AsyncSession, run_id: int, outcome: AnswerResponse) -> None:
@@ -72,10 +72,21 @@ async def process_one(
 
     job.status = "running"
     job.attempts += 1
-    await session.flush()
+    # Committed, not just flushed. Uncommitted, no other connection can see it, so a job
+    # that is actively running reads as "queued" to /jobs and to the dashboard for its
+    # whole duration -- which for an ingest is minutes and for a run is hours.
+    #
+    # It also makes the attempt count durable: rolled back by a crash, a worker that
+    # died mid-job would retry forever without ever reaching MAX_ATTEMPTS.
+    await session.commit()
 
     try:
-        result, outcome = await score(job.item_id)
+        # The variant the run was submitted with, not the default. Recording it on the
+        # run while scoring against the default would make every sweep measure the same
+        # configuration and claim otherwise.
+        run = await session.get(EvalRun, job.run_id)
+        variant = SearchRequest(**run.retrieval_config) if run and run.retrieval_config else None
+        result, outcome = await score(job.item_id, variant)
     except Exception as cause:  # noqa: BLE001 - the failure is recorded, not swallowed
         job.error = str(cause)[:1000]
         if job.attempts >= MAX_ATTEMPTS:
@@ -134,12 +145,14 @@ async def run_worker() -> None:
         base_url=settings.ollama_base_url,
     )
 
-    async def score(item_id: str) -> tuple[EvalResult, AnswerResponse]:
+    async def score(
+        item_id: str, search: SearchRequest | None
+    ) -> tuple[EvalResult, AnswerResponse]:
         # Looked up by id rather than read off the job row: the dataset on disk is the
         # single source of truth for what an item says, and copying the question into the
         # row would let the two drift apart silently.
         items = {i.id: i for i in load_dataset(settings.dataset_path)}
-        return await score_item(items[item_id], answer_client, judge_client, None)
+        return await score_item(items[item_id], answer_client, judge_client, search)
 
     logger.info("eval worker %s consuming %s", consumer, EVAL_ITEM_STREAM)
     while True:
@@ -149,8 +162,15 @@ async def run_worker() -> None:
         deliveries += await queue.claim(EVAL_ITEM_STREAM, consumer, count=1)
 
         for delivery in deliveries:
-            async with SessionFactory() as session:
-                await process_one(session, queue, delivery, score)
+            try:
+                async with SessionFactory() as session:
+                    await process_one(session, queue, delivery, score)
+            except Exception:  # noqa: BLE001 - a transient fault must not end the worker
+                # Unhandled, anything here -- a Redis blip, a deadlock, a poisoned
+                # session -- exits asyncio.run and the container stays dead with a run
+                # stuck at running forever. The message is left unacknowledged, so the
+                # item returns after the visibility timeout.
+                logger.exception("eval item %s raised; leaving it unacknowledged", delivery.job_id)
 
 
 def main() -> None:

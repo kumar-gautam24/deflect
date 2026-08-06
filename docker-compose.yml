@@ -86,6 +86,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       answer:
         condition: service_started
 
@@ -98,6 +100,9 @@ services:
       context: .
       dockerfile: services/retrieval/Dockerfile
     command: ["python", "-m", "retrieval.worker"]
+    # The loop catches per-job faults, but a process that dies anyway must come back:
+    # its unacknowledged messages only return once something is consuming again.
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_retrieval
       REDIS_URL: redis://redis:6379/0
@@ -114,6 +119,7 @@ services:
       context: .
       dockerfile: services/evals/Dockerfile
     command: ["python", "-m", "evals.worker"]
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+asyncpg://deflect:deflect@db:5432/deflect_evals
       REDIS_URL: redis://redis:6379/0

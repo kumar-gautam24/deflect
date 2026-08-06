@@ -104,3 +104,29 @@ async def test_an_already_finished_job_is_not_redone(session):
     await process_one(session, queue, claimed, ingest)
 
     assert await queue.pending_count(INGEST_STREAM) == 0
+
+
+async def test_the_job_is_marked_done_even_though_ingest_expunges_the_session(session):
+    """ingest_directory calls expunge_all() after each document to bound memory, which
+    detaches the job the worker is holding. Every other test here injects a fake that
+    never touches the session, so none of them saw that writing through the detached
+    object was silently discarded -- leaving the row at "running" forever while the
+    message was acknowledged.
+    """
+    job = await _queued(session)
+    queue = FakeJobQueue()
+
+    async def expunging_ingest(db, root, sha) -> int:
+        # Exactly what the real pipeline does between documents.
+        await db.flush()
+        db.expunge_all()
+        return 2370
+
+    await process_one(session, queue, Delivery("1-0", job.id), expunging_ingest)
+
+    # Read it back rather than trusting the in-memory object, which is the whole point.
+    from retrieval.models import IngestJob
+
+    persisted = await session.get(IngestJob, job.id)
+    assert persisted.status == "done"
+    assert persisted.chunks == 2370

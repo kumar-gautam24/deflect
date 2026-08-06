@@ -134,10 +134,15 @@ async def ingest(request: IngestRequest, session: SessionDep, queue: QueueDep) -
     session.add(job)
     await session.flush()
 
-    # Row first, then the message, both inside this transaction. A failed enqueue rolls
-    # the row back, so a message never refers to a job that does not exist.
-    await queue.enqueue(INGEST_STREAM, job.id)
+    # Committed BEFORE enqueueing, not after. A worker blocked on XREADGROUP receives the
+    # message the instant it is added, and if this transaction has not committed yet the
+    # worker finds no row -- which it treats as a job whose commit failed, and
+    # acknowledges. The job would then never run and never be retried.
+    #
+    # The cost of this order is the opposite failure: a committed job with no message,
+    # which is visible as a queued row and can be re-enqueued. A dropped job cannot.
     await session.commit()
+    await queue.enqueue(INGEST_STREAM, job.id)
 
     return {"job_id": job.id}
 

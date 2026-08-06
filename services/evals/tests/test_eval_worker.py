@@ -43,7 +43,7 @@ async def _claimed(queue: FakeJobQueue, job_id: int) -> Delivery:
     return (await queue.claim(EVAL_ITEM_STREAM, "w1", 10))[0]
 
 
-async def _score(item_id: str):
+async def _score(item_id: str, search=None):
     return _row(item_id), _outcome()
 
 
@@ -103,7 +103,7 @@ async def test_a_failing_item_is_retried_before_it_is_failed(session):
     queue = FakeJobQueue()
     claimed = await _claimed(queue, job.id)
 
-    async def score(item_id: str):
+    async def score(item_id: str, search=None):
         raise RuntimeError("provider timed out")
 
     await process_one(session, queue, claimed, score)
@@ -120,7 +120,7 @@ async def test_an_exhausted_item_fails_and_lets_the_run_finish(session):
     queue = FakeJobQueue()
     claimed = await _claimed(queue, job.id)
 
-    async def score(item_id: str):
+    async def score(item_id: str, search=None):
         raise RuntimeError("provider timed out")
 
     await process_one(session, queue, claimed, score)
@@ -135,7 +135,7 @@ async def test_a_message_whose_job_row_is_missing_is_acknowledged(session):
     queue = FakeJobQueue()
     claimed = await _claimed(queue, 999999)
 
-    async def score(item_id: str):
+    async def score(item_id: str, search=None):
         raise AssertionError("must not run")
 
     await process_one(session, queue, claimed, score)
@@ -166,3 +166,22 @@ async def test_a_duplicate_score_does_not_kill_the_worker(session):
     # only done or failed -- so the run would wait forever on an item already scored.
     assert job.status == "done"
     assert run.status == "complete"
+
+
+async def test_the_run_search_variant_reaches_the_scorer(session):
+    """The variant is recorded on the run, so scoring against the default instead would
+    make every retrieval sweep measure the same configuration and claim otherwise."""
+    run, job = await _run_with_one_item(session)
+    run.retrieval_config = {"query": "placeholder", "use_rerank": False}
+    await session.flush()
+
+    seen = {}
+
+    async def score(item_id: str, search=None):
+        seen["search"] = search
+        return _row(item_id), _outcome()
+
+    await process_one(session, FakeJobQueue(), Delivery("1-0", job.id), score)
+
+    assert seen["search"] is not None
+    assert seen["search"].use_rerank is False

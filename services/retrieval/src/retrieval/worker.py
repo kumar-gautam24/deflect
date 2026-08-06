@@ -58,10 +58,16 @@ async def process_one(
 
     job.status = "running"
     job.attempts += 1
-    await session.flush()
+    # Committed, not just flushed. Uncommitted, no other connection can see it, so a job
+    # that is actively running reads as "queued" to /jobs and to the dashboard for its
+    # whole duration -- which for an ingest is minutes and for a run is hours.
+    #
+    # It also makes the attempt count durable: rolled back by a crash, a worker that
+    # died mid-job would retry forever without ever reaching MAX_ATTEMPTS.
+    await session.commit()
 
     try:
-        job.chunks = await ingest(session, Path(job.root), job.commit_sha)
+        chunks = await ingest(session, Path(job.root), job.commit_sha)
     except Exception as cause:  # noqa: BLE001 - the failure is recorded, not swallowed
         job.error = str(cause)[:1000]
         if job.attempts >= MAX_ATTEMPTS:
@@ -77,6 +83,12 @@ async def process_one(
         logger.warning("ingest job %s failed, attempt %s: %s", job.id, job.attempts, cause)
         return
 
+    # ingest_directory calls expunge_all() after each document to bound memory, which
+    # detaches this job along with everything else. Writing through the detached object
+    # would be silently discarded at commit, leaving the row at "running" forever while
+    # the message was acknowledged -- a job that can never finish and never retry.
+    job = await session.get(IngestJob, delivery.job_id)
+    job.chunks = chunks
     job.status = "done"
     job.error = None
     await session.commit()
@@ -99,8 +111,15 @@ async def run_worker() -> None:
         deliveries += await queue.claim(INGEST_STREAM, consumer, count=1)
 
         for delivery in deliveries:
-            async with SessionFactory() as session:
-                await process_one(session, queue, delivery)
+            try:
+                async with SessionFactory() as session:
+                    await process_one(session, queue, delivery)
+            except Exception:  # noqa: BLE001 - a transient fault must not end the worker
+                # Unhandled, anything here -- a Redis blip, a deadlock, a poisoned
+                # session -- exits asyncio.run and the container stays dead with the
+                # queue still full. The message is left unacknowledged, so the work
+                # returns after the visibility timeout.
+                logger.exception("ingest job %s raised; leaving it unacknowledged", delivery.job_id)
 
 
 def main() -> None:
