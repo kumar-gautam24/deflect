@@ -1,3 +1,5 @@
+import { COOKIE_NAME } from "@/lib/session";
+
 export type Citation = {
   source_path: string;
   heading_path: string;
@@ -86,10 +88,18 @@ async function getJSONFrom<T>(base: string, path: string, token?: string): Promi
   return response.json();
 }
 
-// Traces are operator-only, so this server component carries the operator token. The
-// browser never sees it.
-export function getFromAnswer<T>(path: string): Promise<T> {
-  return getJSONFrom<T>(ANSWER_URL, path, process.env.OPERATOR_TOKEN);
+// The traces surface shows data because the person asking is allowed to see it, not
+// because the server holds a master key. Forwarding the caller's own credential is what
+// makes the audit trail meaningful.
+//
+// next/headers is imported dynamically, not at module scope: this file also exports
+// askStream, which the client-rendered ask page imports, and a static import of
+// next/headers pulls it into that browser bundle too, which Turbopack refuses to build.
+// A dynamic import keeps it out of any bundle that never calls this function.
+export async function getFromAnswer<T>(path: string): Promise<T> {
+  const { cookies } = await import("next/headers");
+  const token = (await cookies()).get(COOKIE_NAME)?.value;
+  return getJSONFrom<T>(ANSWER_URL, path, token);
 }
 
 // The eval dashboard is public and needs no credential.

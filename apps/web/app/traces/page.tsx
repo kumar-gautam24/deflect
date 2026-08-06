@@ -1,10 +1,21 @@
+import { redirect } from "next/navigation";
+
 import { TraceRow } from "@/components/trace-row";
 import { type TraceSummary, getFromAnswer } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
 
 export default async function TracesPage() {
-  const traces = await getFromAnswer<TraceSummary[]>("/traces");
+  let traces: TraceSummary[];
+  try {
+    traces = await getFromAnswer<TraceSummary[]>("/traces");
+  } catch (cause) {
+    // With proxy.ts gone, this is what stops an anonymous visitor from seeing a stack
+    // trace instead of a login form: no session cookie means the answer service sends
+    // 401, and that is the one failure this page handles rather than lets crash.
+    if (cause instanceof Error && cause.message.includes("returned 401")) redirect("/login");
+    throw cause;
+  }
 
   return (
     <main className="mx-auto max-w-4xl space-y-6 p-8">
