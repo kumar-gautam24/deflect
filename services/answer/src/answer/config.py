@@ -53,6 +53,17 @@ class Settings(BaseSettings):
     # both together if either changes.
     ask_daily_limit: int = 500
 
+    # A CPU/spend backstop for the direct door, not the precise control -- the gateway's
+    # own per-visitor ask_rate_limit_per_hour (20) is that. This service stayed type: web
+    # on Render, because the private split needs a paid plan that could not be confirmed,
+    # so /ask is reachable directly and every attempt still runs a full model call
+    # regardless of who dialled it. Keyed on the true peer, which cannot distinguish the
+    # gateway's own traffic from anyone else's -- the gateway forwards whatever credential
+    # the caller sent rather than proving its own identity, so every request the gateway
+    # relays looks identical to this check and must never trip it. Set an order of
+    # magnitude above the gateway's per-visitor limit rather than trying to match it.
+    ask_backstop_per_hour: int = 200
+
 
 @lru_cache
 def get_settings() -> Settings:

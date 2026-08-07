@@ -20,9 +20,11 @@ RUN uv sync --no-dev --frozen
 RUN useradd --system --uid 10001 --create-home --home-dir /home/deflect deflect \
     && chown -R deflect /app
 USER deflect
-# One worker: the login limiter is an in-process dict, so N workers would mean N
-# independent buckets and the limit would silently become N times what it says. The same
-# reasoning pins the answer service to one worker.
+# One worker: /auth/login's backstop limiter (auth/policy.py's LOGIN_BACKSTOP_PER_HOUR) is
+# an in-process dict, so N workers would mean N independent buckets and the backstop would
+# silently become N times as generous -- undermining the one thing it exists to bound.
+# Account lockout is a database query and is already safe under any worker count. The same
+# reasoning pins the answer service to one worker, for its own backstop.
 #
 # Explicit, because the default trusts 127.0.0.1 and rewrites request.client from
 # X-Forwarded-For before the application runs -- which silently defeats every

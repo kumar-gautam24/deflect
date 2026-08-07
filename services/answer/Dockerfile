@@ -27,13 +27,15 @@ RUN useradd --system --uid 10001 --create-home --home-dir /home/deflect deflect 
     && mkdir -p /app/.cache/huggingface \
     && chown -R deflect /app /home/deflect
 USER deflect
-# EXACTLY ONE WORKER, deliberately. The per-address rate limiter in ratelimit.py is an
-# in-process dict, so N workers would mean N independent limiters and a 20-per-hour limit
-# would silently become 20N. This service awaits a model provider rather than burning CPU,
-# so async concurrency already carries its load and workers would buy almost nothing anyway.
+# EXACTLY ONE WORKER, deliberately. /ask's backstop limiter (config.py's
+# ask_backstop_per_hour) is an in-process dict, so N workers would mean N independent
+# limiters and the backstop would silently become N times as generous -- undermining the
+# one thing it exists to bound. This service awaits a model provider rather than burning
+# CPU, so async concurrency already carries its load and extra workers would buy almost
+# nothing anyway.
 #
-# When the job queue arrives and brings Redis, the limiter moves there and this can scale
-# out. Until then, raising this number weakens the abuse control.
+# When the job queue arrives and brings Redis, the limiter can move there and this can
+# scale out. Until then, raising this number weakens the backstop.
 #
 # Explicit, because the default trusts 127.0.0.1 and rewrites request.client from
 # X-Forwarded-For before the application runs -- which silently defeats every

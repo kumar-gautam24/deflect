@@ -361,14 +361,29 @@ primitive.
 `/ask` is open, because the demo is. What used to be a per-address sliding window in
 `answer` is now a leaky bucket at the gateway — 20 requests an hour per address, smoothed
 to a burst of 5 rather than letting the whole hour go in one second — and `answer` keeps
-only the daily cap, counted from `traces`, because that one counts rows in `answer`'s own
+the daily cap, counted from `traces`, because that one counts rows in `answer`'s own
 database and is a spend bound rather than an abuse bound. A botnet has many real
 addresses, so only the daily cap actually protects the bill; the two stay sized together
 regardless of which service enforces which — 20 an hour over 24 hours is 480, just under
 the 500 daily ceiling, so no single address can exhaust a day's budget. `/auth/login`
-moved the same way: the per-address window is now the gateway's `login` bucket (60/hour,
-burst 10), and account lockout — five wrong passwords, fifteen minutes, per account rather
-than per address — stays the precise control in `auth`, described below.
+moved the same way: the precise, per-visitor window is now the gateway's `login` bucket
+(60/hour, burst 10), and account lockout — five wrong passwords, fifteen minutes, per
+account rather than per address — stays the precise control in `auth`, described below.
+
+Both `answer` and `auth` also keep a second, coarser limiter of their own, because the
+private-network split this move assumed needs a Render plan that could not be confirmed:
+all four services stayed `type: web`, so `/ask` and `/auth/login` are reachable directly,
+and each is precisely the route with no `principal_guard` behind it to catch what the
+gateway misses. Measured: 9 direct logins to `:8004` returned 401 nine times with no
+throttle at all, while the same 9 through the gateway hit 429 at the sixth — each direct
+attempt still ran a full, unconditional argon2id hash. `answer.ask_backstop_per_hour`
+(200) and `auth.Policy.LOGIN_BACKSTOP_PER_HOUR` (600) are that backstop: a CPU/spend bound
+for the direct door, keyed on the true peer rather than a header, sized an order of
+magnitude above the gateway's own per-visitor limit so it never bites traffic the gateway
+already allowed through — every request the gateway relays looks identical to this check,
+since the gateway forwards whatever credential the caller sent rather than proving its own
+identity. The gateway's limiter stays the precise control; these exist only because the
+service behind it is still public.
 
 ### The address the gateway trusts
 
@@ -550,10 +565,11 @@ two workers. **The gateway stays pinned to one, deliberately** — its `ask` and
 leaky buckets are in-process dictionaries, so N workers would turn one bucket into N and
 every limit would silently multiply by worker count. `RedisLeakyBucket` already exists,
 tested for exact agreement with the in-memory one, for the day that stops being
-acceptable. `answer` and `auth` are also pinned to one, but the per-address limiters that
-originally justified it moved to the gateway along with `/ask` and `/auth/login`; what
-each keeps in-process now — `answer`'s daily cap, `auth`'s account lockout — is a database
-query, safe under any worker count. Neither Dockerfile has been revisited to say so.
+acceptable. `answer` and `auth` are also pinned to one, and for the same shape of reason:
+each keeps its own coarse backstop limiter in-process now (`ask_backstop_per_hour` and
+`LOGIN_BACKSTOP_PER_HOUR`, described above), and the database-backed controls beside it —
+`answer`'s daily cap, `auth`'s account lockout — are already safe under any worker count.
+Both Dockerfiles say so.
 
 `/health` is liveness and touches no dependency — a probe that queried the database would
 have an orchestrator restart healthy processes during a Postgres hiccup. `/ready` checks

@@ -83,3 +83,28 @@ async def test_a_question_within_budget_is_still_answered(
         response = await client.post("/ask", json={"question": "how do I declare one"})
 
     assert response.status_code == 200
+
+
+async def test_the_backstop_rejects_once_its_own_budget_is_spent(
+    session, make_app, hits, answer_payload, monkeypatch
+):
+    """This is the direct-door control, not the gateway's precise per-visitor one: a
+    caller reaching /ask on :8002 directly, bypassing the gateway's limiter entirely,
+    still gets throttled rather than running an unconditional model call forever.
+    """
+    monkeypatch.setenv("ASK_BACKSTOP_PER_HOUR", "1")
+    from answer.config import get_settings
+
+    get_settings.cache_clear()
+
+    app = make_app([answer_payload("Use Depends.", [1], True)] * 2, FakeRetrieval(hits))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.post("/ask", json={"question": "one"})
+        second = await client.post("/ask", json={"question": "two"})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert int(second.headers["Retry-After"]) > 0
+    get_settings.cache_clear()

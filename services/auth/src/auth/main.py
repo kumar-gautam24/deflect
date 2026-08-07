@@ -1,10 +1,12 @@
 import logging
+import time
 from datetime import UTC, datetime
 from typing import Annotated
 
 from deflect_common.auth import bearer_guard, hash_token
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
+from deflect_common.ratelimit import SlidingWindowLimiter, client_address
 from deflect_common.schemas import LoginRequest
 from deflect_common.sessions import RedisSessionStore, SessionStore
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
@@ -17,6 +19,7 @@ from auth.config import get_settings
 from auth.db import SessionDep
 from auth.models import AdminUser
 from auth.models import Session as SessionRow
+from auth.policy import Policy
 from auth.service import AccountLocked, LoginFailed, login, logout, logout_all
 
 logger = logging.getLogger(__name__)
@@ -62,6 +65,20 @@ def build_sessions() -> SessionStore:
 
 
 SessionsDep = Annotated[SessionStore, Depends(build_sessions)]
+
+# A CPU/spend backstop for the direct door -- see LOGIN_BACKSTOP_PER_HOUR in policy.py
+# for why the number is generous rather than precise. Built once at module scope and
+# exposed through Depends rather than a closure: a `lambda: SlidingWindowLimiter(...)`
+# override would hand each request a fresh, empty limiter and the backstop could never
+# actually trip.
+_login_backstop = SlidingWindowLimiter(Policy.LOGIN_BACKSTOP_PER_HOUR, window_seconds=3600)
+
+
+def build_login_backstop() -> SlidingWindowLimiter:
+    return _login_backstop
+
+
+LoginBackstopDep = Annotated[SlidingWindowLimiter, Depends(build_login_backstop)]
 
 
 async def current_session(
@@ -113,12 +130,28 @@ async def ready(session: SessionDep) -> dict[str, str]:
 
 @router.post("/auth/login")
 async def login_route(
-    request: LoginRequest, http: Request, session: SessionDep, sessions: SessionsDep
+    request: LoginRequest,
+    http: Request,
+    session: SessionDep,
+    sessions: SessionsDep,
+    backstop: LoginBackstopDep,
 ) -> dict:
     # Not the caller's real address once every login goes through the gateway -- it is
     # whichever hop connects to this service directly. Recorded on the session row for an
     # operator to read, not trusted for any decision, so that mismatch does not matter here.
-    address = http.client.host if http.client else "unknown"
+    # The same value keys the backstop below: both want the true peer, not a header.
+    address = client_address(http, trust_forwarded=False)
+
+    # Cheapest check first, ahead of the argon2id this service always runs: the backstop
+    # is a dict lookup, login() is a deliberately slow hash.
+    if not backstop.check(address, time.monotonic()):
+        raise HTTPException(
+            status_code=429,
+            detail="too many requests from this address",
+            # SlidingWindowLimiter has no notion of a partial wait, only allowed or not,
+            # so the full window is the honest answer -- not a placeholder.
+            headers={"Retry-After": "3600"},
+        )
 
     try:
         token, row = await login(

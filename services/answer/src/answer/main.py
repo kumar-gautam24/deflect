@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -10,7 +11,11 @@ from deflect_common.auth import principal_guard
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
-from deflect_common.ratelimit import seconds_until_utc_midnight
+from deflect_common.ratelimit import (
+    SlidingWindowLimiter,
+    client_address,
+    seconds_until_utc_midnight,
+)
 from deflect_common.schemas import AnswerRequest, AnswerResponse
 from deflect_common.sessions import RedisSessionStore, SessionStore
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
@@ -84,17 +89,47 @@ require_viewer = principal_guard(
     "viewer", _settings.service_token, _settings.operator_token, build_sessions
 )
 
+# A CPU/spend backstop for the direct door -- see ask_backstop_per_hour in config.py for
+# why the number is generous rather than precise. Built once at module scope and exposed
+# through Depends, the same shape as _sessions and the breaker elsewhere in this codebase:
+# a `lambda: SlidingWindowLimiter(...)` override would hand each request a fresh, empty
+# limiter and the backstop could never actually trip.
+_ask_backstop = SlidingWindowLimiter(_settings.ask_backstop_per_hour, window_seconds=3600)
+
+
+def build_ask_backstop() -> SlidingWindowLimiter:
+    return _ask_backstop
+
+
+AskBackstopDep = Annotated[SlidingWindowLimiter, Depends(build_ask_backstop)]
+
+
 async def enforce_ask_limits(
     http: Request,
     session: SessionDep,
+    backstop: AskBackstopDep,
 ) -> None:
-    """Reject a question that would exceed the day's budget.
+    """Reject a question that would exceed the backstop or the day's budget.
 
-    The per-address window moved to the gateway, where one address means one thing. This
-    is the spend bound, and it stays here because it counts rows in this service's own
-    traces table.
+    The precise per-visitor window moved to the gateway, where one address means one
+    visitor. Two controls remain here, for the door the gateway does not actually
+    guard: the backstop below, keyed on the true peer because this service is still
+    reachable directly and cannot tell the gateway's own traffic apart from anyone
+    else's; and the daily spend cap, unaffected by who called it because it counts rows
+    in this service's own traces table.
     """
     settings = get_settings()
+    address = client_address(http, trust_forwarded=False)
+    if not backstop.check(address, time.monotonic()):
+        raise HTTPException(
+            status_code=429,
+            detail="too many requests from this address",
+            # SlidingWindowLimiter has no notion of a partial wait, only allowed or not --
+            # the full window is the honest answer here, the same as the daily cap below
+            # before the gateway's leaky bucket could compute one by division.
+            headers={"Retry-After": "3600"},
+        )
+
     now = datetime.now(UTC)
     if await questions_today(session, now) >= settings.ask_daily_limit:
         raise HTTPException(
