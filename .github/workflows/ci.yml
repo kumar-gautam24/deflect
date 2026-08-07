@@ -67,22 +67,24 @@ jobs:
       # _LEAK_LUA is a hand-written reimplementation of _decide in another language --
       # Lua cannot call the Python method, so the only thing that keeps the two from
       # drifting apart is test_redis_and_in_memory_buckets_agree, which was skipping on
-      # every single push because this job never gave it a Redis to reach. bitnami's
-      # image is used rather than the plain redis one because it reads REDIS_PASSWORD
-      # from the environment; the plain image has no way to take a password except a
-      # command-line arg, which the `services:` block cannot pass.
+      # every single push because this job never gave it a Redis to reach.
+      #
+      # No password here, unlike docker-compose. A `services:` container cannot take a
+      # command, so the plain image has no way to be told --requirepass, and the
+      # passworded alternatives are third-party tags that go away (bitnami/redis:7.2 was
+      # tried and its manifest no longer exists). The password locally guards a Redis
+      # published on a host port that decides who is logged in; this one lives for the
+      # length of one job, is reachable only from it, and holds two float counters.
       redis:
-        image: bitnami/redis:7.2
-        env:
-          REDIS_PASSWORD: dev-redis-password
+        image: redis:7-alpine
         ports: ["6379:6379"]
         options: >-
-          --health-cmd "redis-cli -a dev-redis-password ping"
+          --health-cmd "redis-cli ping"
           --health-interval 5s --health-retries 10
     env:
       SERVICE_TOKEN: ci-service-token
       OPERATOR_TOKEN: ci-operator-token
-      RATELIMIT_TEST_REDIS_URL: redis://:dev-redis-password@localhost:6379/0
+      RATELIMIT_TEST_REDIS_URL: redis://localhost:6379/0
       # Turns "Redis unreachable" into a failure instead of a skip, the same pattern
       # REQUIRE_CORPUS_CHECK uses below for the golden-dataset check: a guard that can
       # silently vanish is worthless, and this one already did once.
