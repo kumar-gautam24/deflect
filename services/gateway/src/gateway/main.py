@@ -37,6 +37,14 @@ _settings = get_settings()
 _sessions = RedisSessionStore(_settings.redis_url)
 _client = httpx.AsyncClient()
 require_service = bearer_guard(_settings.service_token, "service")
+# bearer_guard raises on an empty token at construction; built and discarded rather than
+# wired to a route dependency, because the operator credential here isn't decided by one
+# dependency the way "service" is -- principal.allowed resolves it per route from the
+# table. This still gets the fail-closed startup check for free: an unset operator token
+# now aborts import before the process binds a port, same as an unset service token
+# already did -- closing the gap where the comment above claimed that and the code did
+# not, for this one token.
+bearer_guard(_settings.operator_token, "operator")
 
 # One limiter per named allowance. Keyed by the address the edge computed, which is not
 # the address uvicorn would have reported -- see edge_address.
