@@ -10,7 +10,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [retrieval, answer, evals, auth]
+        # gateway has no database of its own -- it only ever talks to the other four --
+        # so the database and migration steps below are skipped for it rather than run
+        # against a schema that does not exist.
+        service: [retrieval, answer, evals, auth, gateway]
     services:
       db:
         image: pgvector/pgvector:pg16
@@ -38,6 +41,7 @@ jobs:
       - run: uv sync
 
       - name: Create this service's databases
+        if: matrix.service != 'gateway'
         run: |
           psql "postgresql://deflect:deflect@localhost:5432/postgres" \
             -c "CREATE DATABASE deflect_${{ matrix.service }}"
@@ -45,7 +49,9 @@ jobs:
             -c "CREATE DATABASE deflect_${{ matrix.service }}_test"
 
       - run: uv run alembic upgrade head
+        if: matrix.service != 'gateway'
       - name: Migrate the test database
+        if: matrix.service != 'gateway'
         run: uv run alembic upgrade head
         env:
           DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_${{ matrix.service }}_test
@@ -103,7 +109,10 @@ jobs:
 
       - name: Wait for every service to report healthy
         run: |
-          for port in 8001 8002 8003; do
+          # 8004 (auth) and 8000 (gateway) close a gap the auth sub-project left: without
+          # them a broken auth image sailed through this job because nothing here ever
+          # called it, and the gateway would have been no better watched.
+          for port in 8001 8002 8003 8004 8000; do
             for attempt in $(seq 1 60); do
               curl -sf "http://localhost:$port/ready" && break
               sleep 5
@@ -116,6 +125,7 @@ jobs:
           docker compose exec -T retrieval alembic upgrade head
           docker compose exec -T answer alembic upgrade head
           docker compose exec -T evals alembic upgrade head
+          docker compose exec -T auth alembic upgrade head
           # Both containers need the corpus: the service validates the path, the
           # worker is what actually reads it.
           docker compose cp /tmp/fastapi-src/docs/en/docs retrieval:/corpus

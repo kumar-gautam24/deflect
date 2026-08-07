@@ -1,6 +1,6 @@
 import { clientAddress } from "@/lib/client-ip";
 
-const ANSWER_URL = process.env.ANSWER_URL ?? "http://localhost:8002";
+const GATEWAY_URL = process.env.GATEWAY_URL ?? "http://localhost:8000";
 const SERVICE_TOKEN = process.env.SERVICE_TOKEN ?? "";
 
 // The browser never holds a provider key. The stream is proxied so the model is
@@ -26,7 +26,7 @@ export async function POST(request: Request) {
     });
   }
 
-  const upstream = await fetch(`${ANSWER_URL}/ask`, {
+  const upstream = await fetch(`${GATEWAY_URL}/ask`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

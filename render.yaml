@@ -1,6 +1,20 @@
 # Three services, three databases. Each owns its own schema and migrations; none
 # reads another's tables.
 services:
+  # The private split (type: pserv) was attempted for these four and abandoned: Render
+  # Private Services require a paid instance type, and nothing in this repo or the
+  # connected Render account establishes which plan this deploy runs on -- the only
+  # account reachable at the time of writing owns an unrelated project, so querying it
+  # would have answered a question about someone else's plan, not this one. Guessing
+  # would have made this comment, and the README paragraph that mirrors it, a false claim
+  # the next reader has no way to catch.
+  #
+  # So these four stay type: web and are reachable directly, not only through the
+  # gateway. The gateway is a front door beside other doors, not the only one. What
+  # actually protects these routes is unchanged by that: principal_guard resolves and
+  # checks every credential itself rather than trusting the gateway's verdict, and each
+  # service's own ENV check keeps its interactive docs off in production regardless of
+  # which door a request came through.
   - type: web
     name: deflect-retrieval
     runtime: docker
@@ -20,8 +34,10 @@ services:
         sync: false
       - key: OPERATOR_TOKEN
         sync: false
+      # Not a secret, and sync: false would leave production docs public and
+      # abuse checks off for any operator who skips setting it by hand.
       - key: ENV
-        sync: false
+        value: production
       - key: CORPUS_ROOT
         sync: false
 
@@ -55,8 +71,10 @@ services:
         sync: false
       - key: OPERATOR_TOKEN
         sync: false
+      # Not a secret, and sync: false would leave production docs public and
+      # abuse checks off for any operator who skips setting it by hand.
       - key: ENV
-        sync: false
+        value: production
 
   - type: web
     name: deflect-evals
@@ -83,8 +101,10 @@ services:
         sync: false
       - key: OPERATOR_TOKEN
         sync: false
+      # Not a secret, and sync: false would leave production docs public and
+      # abuse checks off for any operator who skips setting it by hand.
       - key: ENV
-        sync: false
+        value: production
 
   - type: web
     name: deflect-auth
@@ -105,8 +125,47 @@ services:
         sync: false
       - key: OPERATOR_TOKEN
         sync: false
+      # Not a secret, and sync: false would leave production docs public and
+      # abuse checks off for any operator who skips setting it by hand.
       - key: ENV
+        value: production
+
+  - type: web
+    name: deflect-gateway
+    runtime: docker
+    dockerfilePath: ./services/gateway/Dockerfile
+    dockerContext: .
+    # Readiness, not liveness: this decides whether a deploy can serve traffic,
+    # not merely whether its process exists.
+    healthCheckPath: /ready
+    envVars:
+      # Internal addresses, not secrets: Render's private network resolves a service by
+      # its name, and every service here keeps the fixed port its Dockerfile binds.
+      - key: RETRIEVAL_URL
+        value: http://deflect-retrieval:8001
+      - key: ANSWER_URL
+        value: http://deflect-answer:8002
+      - key: EVALS_URL
+        value: http://deflect-evals:8003
+      - key: AUTH_URL
+        value: http://deflect-auth:8004
+      - key: REDIS_URL
         sync: false
+      # Both services on a call must carry the same SERVICE_TOKEN, so these are set
+      # by hand rather than with generateValue, which would mint a different one each.
+      - key: SERVICE_TOKEN
+        sync: false
+      - key: OPERATOR_TOKEN
+        sync: false
+      # One hop: Render's own edge sits in front of this service and appends the real
+      # client to X-Forwarded-For, so edge_address takes the rightmost entry rather than
+      # falling back to the peer, which on Render would be Render's own load balancer.
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"
+      # Not a secret, and sync: false would leave production docs public and
+      # abuse checks off for any operator who skips setting it by hand.
+      - key: ENV
+        value: production
 
   # Workers: the same images, a different command. type: worker means no port and no
   # health check -- they consume a queue rather than serving requests.
