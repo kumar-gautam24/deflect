@@ -1,3 +1,4 @@
+import math
 import time
 from typing import Annotated
 
@@ -123,8 +124,11 @@ def _handler_for(route: Route):
                 raise HTTPException(
                     status_code=429,
                     detail="too many requests from this address",
-                    # Computed, not assumed. Waiting this long genuinely works.
-                    headers={"Retry-After": str(max(1, int(decision.retry_after)))},
+                    # Ceiling, not floor: int() truncates a fractional wait DOWN, so
+                    # advertising it and then waiting exactly that long could still land
+                    # inside the window and get refused again -- which is what "waiting
+                    # this long genuinely works" requires NOT happening.
+                    headers={"Retry-After": str(max(1, math.ceil(decision.retry_after)))},
                 )
 
         if not await allowed(

@@ -1,5 +1,8 @@
+import math
+
 import httpx
 import pytest_asyncio
+from deflect_common.ratelimit import InMemoryLeakyBucket
 from deflect_common.sessions import FakeSessionStore
 from doubles import build_upstream
 from httpx import ASGITransport, AsyncClient
@@ -34,8 +37,6 @@ async def app():
 def _fresh_limiters():
     """A new set per test: a module-level singleton shared across a session makes one
     test's traffic another test's failure."""
-    from deflect_common.ratelimit import InMemoryLeakyBucket
-
     return {
         "ask": InMemoryLeakyBucket(ASK_RATE, Policy.WINDOW_SECONDS, Policy.ASK_BURST),
         "login": InMemoryLeakyBucket(
@@ -69,15 +70,58 @@ async def test_a_refusal_carries_retry_after(app):
     assert int(response.headers["Retry-After"]) > 0
 
 
-async def test_the_advertised_wait_is_honest(app):
+async def test_the_advertised_wait_is_honest():
+    """The old version only asserted Retry-After < WINDOW_SECONDS, which passes whether or
+    not the value is honest -- and it was not: live, a 39s advertised wait was still
+    refused after sleeping exactly 39s, because int() truncates a fractional retry_after
+    down.
+
+    The refusal is deliberately checked at a FRACTIONAL now (0.5s after a fill done all at
+    once): filling and refusing at the same instant makes retry_after an exact multiple of
+    the drain interval, where int() and math.ceil() happen to agree and this test would
+    pass either way -- every real request lands at an irregular wall-clock instant, which
+    is exactly why the live regression could never have shown up against that clean case.
+
+    This drives the limiter's own clock forward by exactly what the handler would
+    advertise -- max(1, math.ceil(retry_after)), the same arithmetic main.py uses for the
+    header -- and proves the next call is allowed. No sleeping: `now` is already a
+    parameter on the limiter.
+    """
+    limiter = InMemoryLeakyBucket(ASK_RATE, Policy.WINDOW_SECONDS, Policy.ASK_BURST)
     for _ in range(Policy.ASK_BURST):
-        await call(app, "/ask")
+        await limiter.check("addr", now=0.0)
 
-    response = await call(app, "/ask")
+    refused = await limiter.check("addr", now=0.5)
+    assert refused.allowed is False
+    assert refused.retry_after % 1 != 0, "this scenario must be fractional to prove anything"
 
-    assert response.status_code == 429
-    # An hour would be the old hardcoded answer; the real one is one emission interval.
-    assert int(response.headers["Retry-After"]) < Policy.WINDOW_SECONDS
+    advertised = max(1, math.ceil(refused.retry_after))
+    assert (await limiter.check("addr", now=0.5 + advertised)).allowed is True
+
+
+async def test_the_gateways_own_header_is_the_wait_that_actually_works(app, monkeypatch):
+    """The test above proves ceil() is the right rounding in isolation; this proves
+    main.py's handler is actually the code applying it, by driving the REAL handler's
+    clock -- not a bare limiter's -- forward by exactly what its own Retry-After header
+    said, and confirming the request that follows is let through.
+    """
+    clock = {"now": 0.0}
+    monkeypatch.setattr(gateway_main.time, "monotonic", lambda: clock["now"])
+
+    for _ in range(Policy.ASK_BURST):
+        assert (await call(app, "/ask")).status_code != 429
+
+    # Fractional, for the same reason as above: filling and refusing at the same instant
+    # produces an exact multiple of the drain interval, where a truncating int() and the
+    # correct math.ceil() would advertise the same number and this test would prove nothing.
+    clock["now"] = 0.5
+    refused = await call(app, "/ask")
+    assert refused.status_code == 429
+
+    advertised = int(refused.headers["Retry-After"])
+    clock["now"] = 0.5 + advertised
+
+    assert (await call(app, "/ask")).status_code != 429
 
 
 async def test_a_spoofed_forwarded_header_does_not_buy_a_fresh_allowance(app):
