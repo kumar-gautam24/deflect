@@ -141,7 +141,6 @@ services:
       answer:
         condition: service_started
 
-
   # Workers run the images already built, with a different command. Each needs its own
   # service's database and dependencies -- the ingest worker embeds, the eval worker
   # judges -- so a shared generic worker would have to carry both.
