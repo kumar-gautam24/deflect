@@ -381,8 +381,9 @@ session.add(job); <span class="kw">await</span> session.flush()
   <h3>Working</h3>
   <ul>
     <li><strong>End to end, verified live.</strong> <code>POST /ask</code> through the gateway streams SSE token by token from the FastAPI corpus.</li>
-    <li>386 tests green across seven suites — gateway 69, common 114, retrieval 70, answer 54, evals 82+1 skip, auth 42, web 21.</li>
+    <li>459 tests green across seven suites (plus 1 skip in evals) — gateway 74, common 114, retrieval 70, answer 55, evals 82+1 skip, auth 43, web 21.</li>
     <li>The gateway branch is complete: routing, principals, streaming proxy, leaky bucket, circuit breaker, deployment.</li>
+    <li><strong>Both Criticals below were found and repaired</strong> by a whole-branch review after all ten task-scoped reviews came back clean — the same pattern as sub-project C, and the reason that pass exists.</li>
   </ul>
 
   <h3>Open, and known</h3>
@@ -390,8 +391,8 @@ session.add(job); <span class="kw">await</span> session.flush()
     <thead><tr><th>Issue</th><th>Impact</th></tr></thead>
     <tbody>
       <tr><td><strong>CI has never passed</strong> — no <code>GROQ_API_KEY</code> repository secret is configured, so <code>evals-worker</code> refuses to boot and <code>eval-smoke</code> times out ingesting the corpus.</td><td>Every run red since 5 Aug. Predates the gateway work. Either set the secret, or make the job skip when it is absent — forks and PRs will never have it.</td></tr>
-      <tr><td><strong>The <code>/ask</code> limit keys on the BFF, not the visitor.</strong> The BFF overwrites XFF with one entry; Render appends its own, so <code>edge_address</code> returns the Vercel egress node.</td><td>The whole demo shares one bucket. Fix identified: trust the leftmost entry when the caller presented <code>SERVICE_TOKEN</code>.</td></tr>
-      <tr><td><strong>Moving the limiters removed them from two public routes.</strong> The Render private split needs a paid plan, so the four services stay directly reachable — and <code>/ask</code> and <code>/auth/login</code> are the only routes with no guard at all.</td><td>Measured: 9 direct logins to <code>:8004</code>, no throttle; the same 9 through the gateway hit 429 at the sixth. Each runs an unconditional argon2id. Fix chosen: a coarse backstop limiter in both services.</td></tr>
+      <tr><td><strong>Fixed — the <code>/ask</code> limit keyed on the BFF, not the visitor.</strong> The BFF overwrites XFF with one entry; Render appends its own, so <code>edge_address</code> returned the Vercel egress node and every visitor shared one bucket.</td><td>The handler now trusts the leftmost entry only for a caller holding <code>SERVICE_TOKEN</code> — the BFF proving it computed the address itself rather than relayed it — and falls back to <code>edge_address</code> for everyone else. Proven load-bearing: reverting the change made the new regression test fail before the fix was restored.</td></tr>
+      <tr><td><strong>Fixed — moving the limiters had removed them from two public routes.</strong> The Render private split needs a paid plan that could not be confirmed, so all four services stayed directly reachable, and <code>/ask</code> and <code>/auth/login</code> were the only routes with no guard at all. Measured: 9 direct logins to <code>:8004</code> returned 401 nine times with no throttle; the same 9 through the gateway hit 429 at the sixth.</td><td>Each service now keeps a coarse <code>SlidingWindowLimiter</code> backstop of its own again, keyed on the true peer rather than a header — an order of magnitude above the gateway's own per-visitor limit so it never bites traffic the gateway already allowed (<code>answer.ask_backstop_per_hour</code> = 200, <code>auth.Policy.LOGIN_BACKSTOP_PER_HOUR</code> = 600). The gateway's limiter stays the precise control; this is the CPU/spend bound for the door that is still public.</td></tr>
       <tr><td><code>sessions.ip</code> now records the gateway's address, not the caller's.</td><td>An audit column became a constant. Documented, not yet fixed.</td></tr>
     </tbody>
   </table></div>
