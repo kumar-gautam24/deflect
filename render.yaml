@@ -1,5 +1,6 @@
-# Three services, three databases. Each owns its own schema and migrations; none
-# reads another's tables.
+# Five services, four databases. Each database-backed service owns its own schema and
+# migrations; none reads another's tables. The gateway is the fifth service and the one
+# without a database -- it owns routing and edge policy, not data.
 services:
   # The private split (type: pserv) was attempted for these four and abandoned: Render
   # Private Services require a paid instance type, and nothing in this repo or the

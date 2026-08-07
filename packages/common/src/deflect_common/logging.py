@@ -1,6 +1,6 @@
-"""Structured logging shared by all three services.
+"""Structured logging shared by every service.
 
-A ~30-line formatter rather than structlog: three services need identical log shape,
+A ~30-line formatter rather than structlog: five services need identical log shape,
 which is exactly what this package is for, and one small class is cheaper to own than a
 dependency.
 """

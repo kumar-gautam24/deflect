@@ -88,10 +88,12 @@ aspirational.
 | `retrieval` | owns the corpus, the embeddings and the search |
 | `answer` | runs the gate and the model, records every question as a trace |
 | `evals` | runs the golden dataset and scores it |
+| `auth` | issues and revokes the opaque sessions everything else trusts |
+| `gateway` | the public edge: routing, rate limits and credential checks in one place |
 | `web` | Next.js UI for asking, browsing eval runs, and reading traces |
 
-Three FastAPI services with a database each, Postgres with pgvector, Groq for generation and
-judging, and local models for embedding and reranking.
+Five FastAPI services — four with a database each, and a gateway with none — Postgres with
+pgvector, Groq for generation and judging, and local models for embedding and reranking.
 
 ## Results
 
@@ -188,13 +190,35 @@ Two caveats that belong with this number rather than buried:
 | `retrieval` | 8001 | `deflect_retrieval` | `documents`, `chunks` |
 | `answer` | 8002 | `deflect_answer` | `traces`, `escalations` |
 | `evals` | 8003 | `deflect_evals` | `eval_runs`, `eval_results` |
+| `auth` | 8004 | `deflect_auth` | `admin_users`, `sessions` |
+| `gateway` | 8000 | none | routing and edge policy |
 | `web` | 3000 | none | UI and backend-for-frontend |
 
 ```
-web ──/api/ask──> answer ──/search──> retrieval
-                    ^
-evals ──/answer─────┘
+web ──/api/ask──────> gateway ──> answer ──/search──> retrieval
+web ──/traces───────> gateway ──> answer
+web ──/eval-runs────> gateway ──> evals ──/answer──> answer
+web ──/api/auth/login, /auth/logout──────────────────────> auth  (direct, not through the gateway)
 ```
+
+Everything public-facing goes through the gateway except one thing: the web app's own
+login and logout calls still go straight to `auth`, because `auth` never stopped being
+directly reachable — see below. Service-to-service calls (`answer` → `retrieval`,
+`evals` → `answer`) are unchanged: they cross the private network directly, the same as
+before the gateway existed. The gateway fronts the public edge, not internal calls.
+
+**This isn't the only door, and the README says so rather than implying otherwise.**
+`retrieval`, `answer`, `evals` and `auth` all remain `type: web` on Render — reachable at
+their own public URLs, not only through the gateway. The private split (`type: pserv`)
+was attempted and abandoned: Render Private Services need a paid instance type that
+couldn't be confirmed against the connected account, and guessing would have turned this
+paragraph into a claim the next reader has no way to check. So the gateway centralises
+policy and is the documented entry point, but it is a front door beside other doors, not
+the only one — which is exactly why the web app's own login form can still walk straight
+past it. What actually protects each service is unchanged by that: `principal_guard`
+resolves and checks every credential itself rather than trusting the gateway's verdict,
+and each service's own `ENV` check keeps its interactive docs off in production
+regardless of which door a request came through.
 
 Database per service. No shared tables, no cross-service joins, and each service owns
 its own migrations. `packages/common` holds the wire schemas both sides of every call
@@ -238,12 +262,71 @@ Parallel workers do **not** make a run faster — the provider's rate limit is t
 not worker count. What the queue buys is retry granularity, visible progress, and survival
 across a restart.
 
-**What it still does not need.** No service mesh, no Kubernetes, no distributed tracing
-backend. Adding infrastructure the system has no use for would obscure the parts worth
-understanding — and note that the broker earned its place only after the synchronous
-version had failed twice in practice, not because a diagram looked better with one.
+**What it needed next, and why that's a different kind of "needed."** A gateway — but
+say plainly why, because it is not the same reason the broker exists. The honest reason is
+breadth: this project is built for a resume and for learning, not for end users, and
+demonstrating that a gateway is understood has value here that it would not have in a
+product with real traffic. There was also a real problem to point it at: `retrieval`,
+`answer`, `evals` and `auth` were each their own `type: web` service on Render with their
+own public URL, so every edge policy — rate limiting, CORS, docs exposure, credential
+handling — had to be enforced four times or not at all, and a policy remembered in four
+places is a policy that eventually gets missed in one. Both statements are true, and
+neither is allowed to hide the other. But unlike the message broker, which earned its
+place only after two eval runs were destroyed in practice, **nothing forced this one.** No
+run failed, no request timed out, no incident preceded it. This document's credibility
+comes from having once said "this was not needed"; it survives only if it also says, here,
+"this one was chosen, not forced."
+
+**What it still does not need.** No Kubernetes, no distributed tracing backend, and —
+despite the gateway above — no service mesh either. The two solve different problems: a
+gateway terminates public traffic at one place, deciding what a stranger may reach before
+any service sees the request; a mesh governs traffic *between* services that already trust
+each other, adding things like mTLS and per-hop retries to calls that were already
+private. Five services calling a handful of fixed, known URLs over a private network have
+no use for the second. Adding infrastructure the system has no use for would obscure the
+parts worth understanding — and note that the broker earned its place only after the
+synchronous version had failed twice in practice, not because a diagram looked better with
+one.
 
 ## Security
+
+The gateway is where this answer now lives: `services/gateway/src/gateway/routes.py` is a
+dependency-free table, deliberately readable without following an import into an HTTP
+client — a path absent from it is a 404 **at the gateway**, which never becomes an
+upstream request, a stronger guarantee than a path that is merely guarded.
+
+| method | path | upstream | requires | notes |
+| --- | --- | --- | --- | --- |
+| POST | `/ask` | answer | public | rate limited (`ask`), streamed |
+| POST | `/auth/login` | auth | public | rate limited (`login`) |
+| POST | `/auth/logout` | auth | session | |
+| POST | `/auth/logout-all` | auth | session | |
+| GET | `/auth/me` | auth | session | |
+| GET | `/traces` | answer | viewer | |
+| GET | `/traces/{trace_id}` | answer | viewer | |
+| POST | `/search` | retrieval | service | |
+| GET | `/documents` | retrieval | service | |
+| POST | `/ingest` | retrieval | operator | returns `202` |
+| GET | `/jobs/{job_id}` | retrieval | operator | |
+| GET | `/jobs/{job_id}/events` | retrieval | operator | streamed |
+| POST | `/runs` | evals | operator | returns `202` |
+| GET | `/eval-runs` | evals | public | |
+| GET | `/eval-runs/diff` | evals | public | |
+| GET | `/eval-runs/{run_id}` | evals | public | |
+| GET | `/eval-runs/{run_id}/events` | evals | public | streamed |
+
+`/health` and `/ready` on the gateway are its own, not proxied — a readiness check that
+probed four upstreams would turn one sick service into an unready edge. `/metrics` is not
+in the table at all, so it is unroutable rather than protected, and stays reachable only
+inside the private network for a scraper. `/docs`, `/redoc` and `/openapi.json` are
+appended to the table only when `ENV` is not `production`.
+
+### Per-service guards — defence in depth, not the primary control
+
+Nothing below was deleted when the gateway arrived. Every route the table above allows
+still runs its own check on the far side, because a request that reaches a service by any
+other path — direct to its still-public Render URL, or straight past a gateway bug — must
+still be refused on its own. The gateway's verdict is duplicated, not trusted.
 
 | service | route | principal |
 | --- | --- | --- |
@@ -254,17 +337,17 @@ version had failed twice in practice, not because a diagram looked better with o
 | retrieval | `POST /search` | service |
 | retrieval | `POST /ingest` | operator, plus path confinement — returns `202` |
 | retrieval | `GET /jobs/{job_id}`, `/jobs/{job_id}/events` | operator |
-| answer | `POST /ask` | public, rate limited |
+| answer | `POST /ask` | public |
 | answer | `POST /answer` | service |
 | answer | `GET /traces`, `GET /traces/{id}` | viewer |
 | evals | `POST /runs` | operator — returns `202` |
 | evals | `GET /eval-runs`, `/eval-runs/diff`, `/eval-runs/{id}`, `/eval-runs/{id}/events` | public |
-| auth | `POST /auth/login` | public, rate limited |
+| auth | `POST /auth/login` | public |
 | auth | `POST /auth/logout`, `/auth/logout-all`, `GET /auth/me` | valid session |
 
 Two static bearer tokens carried in the environment, enforced by one dependency in
 `packages/common`. An API-key table with per-caller revocation would have needed either a
-shared table or one duplicated into all three databases, trading the invariant the split
+shared table or one duplicated into all four databases, trading the invariant the split
 exists to demonstrate for machinery a single-operator deployment will not use.
 
 Every service refuses to start with either token unset, so a misconfigured deploy never
@@ -272,11 +355,38 @@ takes traffic. `/ingest` additionally resolves its requested root and rejects an
 outside `CORPUS_ROOT`: a leaked operator token should not become a filesystem read
 primitive.
 
-`/ask` is open, because the demo is. A per-address sliding window stops one script, and a
-daily cap counted from `traces` bounds the provider bill. Only the second of those is a
-spend bound -- a botnet has many real addresses -- and the two are sized together: 20 an
-hour over 24 hours is 480, just under the 500 daily ceiling, so no single address can
-exhaust a day's budget.
+`/ask` is open, because the demo is. What used to be a per-address sliding window in
+`answer` is now a leaky bucket at the gateway — 20 requests an hour per address, smoothed
+to a burst of 5 rather than letting the whole hour go in one second — and `answer` keeps
+only the daily cap, counted from `traces`, because that one counts rows in `answer`'s own
+database and is a spend bound rather than an abuse bound. A botnet has many real
+addresses, so only the daily cap actually protects the bill; the two stay sized together
+regardless of which service enforces which — 20 an hour over 24 hours is 480, just under
+the 500 daily ceiling, so no single address can exhaust a day's budget. `/auth/login`
+moved the same way: the per-address window is now the gateway's `login` bucket (60/hour,
+burst 10), and account lockout — five wrong passwords, fifteen minutes, per account rather
+than per address — stays the precise control in `auth`, described below.
+
+### The address the gateway trusts
+
+`deflect_common.ratelimit` keeps two functions for "the caller's address" —
+`client_address` and `edge_address` — rather than one function with a boolean, because the
+trust rule inverts depending on where a service sits relative to the public internet.
+`client_address(trust_forwarded=True)` takes the **leftmost** `X-Forwarded-For` entry:
+right for a service standing behind exactly one forwarder it trusts to compute the
+visitor's address itself and *overwrite* the header rather than relay it, which is the
+shape the web BFF still has when it calls the gateway for `/ask`. `edge_address(request,
+trusted_hops)` takes the **rightmost** *n* entries instead, because the gateway is the
+opposite shape: it sits behind Render's own load balancer, which **appends** the real
+client to whatever arrived rather than replacing it, so the leftmost entry there is
+whatever the caller sent and only the entry the trusted proxy itself wrote is safe.
+Collapsing these into one flag would invite a future caller to pick the wrong end and
+never find out — the two rules aren't a spectrum, they're opposites, and getting this
+backwards has already cost something real once: an earlier version of this project trusted
+`uvicorn`'s default proxy handling, which rewrites `request.client` from an unvalidated
+forwarded header, and the limiter it was meant to protect was provably decorative until
+that was caught — over a real HTTP request, because the in-process test transport never
+passes through the middleware that does the rewriting.
 
 ### Who did this
 
@@ -309,6 +419,26 @@ the same `401` and the same body as a wrong password, and no `Retry-After`: the 
 reachable only for an account that exists, so any reply that differed would answer "is this
 address an admin?" in five requests. The admin is not told why; the operator finds it in the
 auth service's logs, which record the user id and nothing else.
+
+**What the gateway costs the audit trail.** The `sessions.ip` column exists so an operator
+can see where a login came from — recorded, not trusted for any decision. The gateway
+strips every inbound `X-Forwarded-*` header before dialling an upstream and sets none of
+its own, on purpose: nothing downstream is meant to trust a forwarded value it did not
+compute itself. `auth`'s login route records `request.client.host`, the address of
+whichever process opened the TCP connection to it directly. For a request that reaches
+`/auth/login` through the gateway's route table above, that process is the gateway, not
+the visitor — so `sessions.ip` now records the same private-network address for every
+login that arrives that way. The column still writes a value; it just no longer answers
+the question it was built to answer. (The web app's own login form still calls `auth`
+directly rather than through the gateway — see the request diagram above — so it is not
+exercising this path today. But the gateway's `/auth/login` is the documented public
+entry point, and this is what happens to anything that uses it, including that form the
+day it's pointed at the gateway too.) This is not fixed here, on purpose: the fix is
+either teach the gateway to compute and forward the real address the way the web BFF
+already does for `/ask`, and teach `auth` to trust it from that one edge — or accept the
+loss and drop the column, and say why in the code rather than let it keep implying data
+it no longer holds. Recording the choice is the point of this paragraph; making it isn't
+this task's job.
 
 Accounts are created with `python -m auth.cli create-admin --email you@example.com`. There
 is no signup route: this system has operators, not users.
@@ -359,11 +489,12 @@ never exercise refusal. The full dataset runs nightly.
 ## Running it
 
 ```bash
-docker compose up -d --build      # postgres plus all three services
+docker compose up -d --build      # postgres plus all five services (the gateway has no
+                                   # migration of its own -- it owns no database)
 # Host ports are overridable if one is taken: RETRIEVAL_PORT=9001 docker compose up
 
-# Migrate each service, then ingest the corpus through the retrieval service.
-for s in retrieval answer evals; do docker compose exec -T $s alembic upgrade head; done
+# Migrate each service that has a database, then ingest the corpus through retrieval.
+for s in retrieval answer evals auth; do docker compose exec -T $s alembic upgrade head; done
 
 git clone --depth 1 https://github.com/fastapi/fastapi /tmp/fastapi-src
 docker compose cp /tmp/fastapi-src/docs/en/docs retrieval:/corpus
@@ -385,14 +516,19 @@ npm run dev
 
 1. **Neon** — one database per service. Run `CREATE EXTENSION vector` on the retrieval
    one only, then apply each service's migrations against its own `DATABASE_URL`.
-2. **Render** — deploy from `render.yaml`. It wires `RETRIEVAL_URL` and `ANSWER_URL`
-   between services; set each `DATABASE_URL` (Neon pooled string, with the
-   `postgresql+asyncpg://` prefix), `GROQ_API_KEY`, `WEB_ORIGIN`, `ENV=production`,
-   `SERVICE_TOKEN`, and
-   `OPERATOR_TOKEN`. The same `SERVICE_TOKEN` must be given to all four services, since
-   each one both presents it and checks it on incoming calls.
-3. **Vercel** — deploy `apps/web` with `ANSWER_URL`, `EVALS_URL` and `AUTH_URL` set to the
-   corresponding Render URLs, plus `OPERATOR_TOKEN` and `SERVICE_TOKEN`.
+2. **Render** — deploy from `render.yaml`. It wires `RETRIEVAL_URL` into `answer`,
+   `ANSWER_URL` into `evals`, and all four upstream URLs into the gateway; set each
+   `DATABASE_URL` (Neon pooled string, with the `postgresql+asyncpg://` prefix),
+   `GROQ_API_KEY`, `WEB_ORIGIN`, `ENV=production`, `SERVICE_TOKEN`, and `OPERATOR_TOKEN`.
+   The same `SERVICE_TOKEN` must be given to all five services, since each one both
+   presents it and checks it on incoming calls. The gateway also takes
+   `TRUSTED_PROXY_HOPS` (`1` on Render, where its own load balancer is the one hop in
+   front) — see "The address the gateway trusts" below for why that number matters.
+3. **Vercel** — deploy `apps/web` with `GATEWAY_URL` set to the Render gateway URL (it
+   carries `/ask`, the traces page and the eval dashboard) and `AUTH_URL` set to the
+   auth service's own Render URL, because login and logout still call `auth` directly
+   rather than through the gateway — see the request diagram under Architecture. Plus
+   `SERVICE_TOKEN`: `/api/ask` refuses to proxy a question at all if it's unset.
 
 `WEB_ORIGIN` is what the answer service's CORS allowlist reads, so the deployed
 frontend must be named there or browser requests are rejected.
@@ -412,34 +548,41 @@ than on every pull request: fourteen minutes per PR trains people to ignore a ga
 ### Running in production
 
 Each service runs under gunicorn with the uvicorn worker class. Retrieval and evals use
-two workers; **the answer service uses exactly one, deliberately.** Its per-address rate
-limiter is an in-process dictionary, so N workers would mean N independent limiters and a
-twenty-per-hour limit would silently become twenty N. That service awaits a model provider
-rather than burning CPU, so workers would buy it almost nothing anyway. Raising it weakens
-the abuse control; when a job queue brings shared storage, the limiter moves there.
+two workers. **The gateway stays pinned to one, deliberately** — its `ask` and `login`
+leaky buckets are in-process dictionaries, so N workers would turn one bucket into N and
+every limit would silently multiply by worker count. `RedisLeakyBucket` already exists,
+tested for exact agreement with the in-memory one, for the day that stops being
+acceptable. `answer` and `auth` are also pinned to one, but the per-address limiters that
+originally justified it moved to the gateway along with `/ask` and `/auth/login`; what
+each keeps in-process now — `answer`'s daily cap, `auth`'s account lockout — is a database
+query, safe under any worker count. Neither Dockerfile has been revisited to say so.
 
 `/health` is liveness and touches no dependency — a probe that queried the database would
 have an orchestrator restart healthy processes during a Postgres hiccup. `/ready` checks
 only the service's own database, and deliberately does not probe the services it calls: a
-readiness check that follows its dependencies turns one outage into all three reporting
-unready, amplifying the failure instead of containing it.
+readiness check that follows its dependencies turns one outage into every dependent
+service reporting unready, amplifying the failure instead of containing it. The gateway's
+own `/ready` follows the same rule for the same reason — it does not probe its four
+upstreams either. A sick upstream is the circuit breaker's job, not the readiness probe's.
 
 Every request carries an `X-Request-ID`, adopted from the caller when present and minted
 otherwise, forwarded across each service hop and included in every JSON log line — so one
-question's path through three services reassembles into a single story.
+request's path through the gateway and whichever services it touches reassembles into a
+single story.
 
 Containers run as a non-root user and pin their base image by digest.
 
 ### Tests
 
 ```bash
-for s in retrieval answer evals auth; do (cd services/$s && uv run pytest -q); done
+for s in retrieval answer evals auth gateway; do (cd services/$s && uv run pytest -q); done
 (cd packages/common && uv run pytest -q)
 cd apps/web && npm test
 ```
 
-245 service tests (70 retrieval, 54 answer, 82 evals, 39 auth), 90 for the shared
-contracts, and 21 component tests. Each service's suite runs against its own test
-database and needs nothing else: the answer service's tests use a fake retrieval, and
-the eval service's tests use a fake answer service, so neither needs a vector database,
-an embedding model or a provider key. That isolation is a direct benefit of the split.
+317 service tests (70 retrieval, 54 answer, 82 evals, 42 auth, 69 gateway), 114 for the
+shared contracts, and 21 component tests. Each service's suite runs against its own test
+database, except the gateway's, which needs none — it owns no data, so its tests fake the
+four upstreams instead. The answer service's tests use a fake retrieval, and the eval
+service's tests use a fake answer service, so neither needs a vector database, an
+embedding model or a provider key. That isolation is a direct benefit of the split.
