@@ -1,8 +1,11 @@
 from datetime import UTC, datetime
 
+import pytest
 from fastapi import Request
 
 from deflect_common.ratelimit import (
+    Decision,
+    InMemoryLeakyBucket,
     SlidingWindowLimiter,
     client_address,
     edge_address,
@@ -170,3 +173,111 @@ def test_whitespace_and_empty_entries_do_not_shift_the_answer():
     request = _request({"X-Forwarded-For": "9.9.9.9 , , 203.0.113.7 "})
 
     assert edge_address(request) == "203.0.113.7"
+
+
+RATE, PERIOD, CAPACITY = 20, 3600.0, 5
+DRAIN = PERIOD / RATE  # 180 seconds to leak one unit
+
+
+def _limiter() -> InMemoryLeakyBucket:
+    return InMemoryLeakyBucket(rate=RATE, period_seconds=PERIOD, capacity=CAPACITY)
+
+
+async def _fill(limiter: InMemoryLeakyBucket, now: float = 0.0) -> None:
+    for _ in range(CAPACITY):
+        await limiter.check("a", now=now)
+
+
+async def test_a_full_bucket_can_be_filled_back_to_back():
+    """Five questions in a row is someone trying the demo, not abusing it."""
+    limiter = _limiter()
+
+    for _ in range(CAPACITY):
+        assert (await limiter.check("a", now=0.0)).allowed is True
+
+
+async def test_the_request_that_would_overflow_is_refused():
+    limiter = _limiter()
+    await _fill(limiter)
+
+    assert (await limiter.check("a", now=0.0)).allowed is False
+
+
+async def test_the_refusal_says_how_long_until_one_unit_has_leaked():
+    limiter = _limiter()
+    await _fill(limiter)
+
+    decision = await limiter.check("a", now=0.0)
+
+    assert decision.retry_after == pytest.approx(DRAIN)
+
+
+async def test_waiting_the_advertised_time_lets_exactly_one_through():
+    """The test the hardcoded Retry-After: 3600 could never have passed."""
+    limiter = _limiter()
+    await _fill(limiter)
+    refused = await limiter.check("a", now=0.0)
+
+    assert (await limiter.check("a", now=refused.retry_after)).allowed is True
+    assert (await limiter.check("a", now=refused.retry_after)).allowed is False
+
+
+async def test_it_keeps_leaking_at_the_sustained_rate():
+    """Twenty an hour, whatever the capacity. One request every drain interval is
+    accepted indefinitely, because that is exactly the rate the hole permits."""
+    limiter = _limiter()
+    await _fill(limiter)
+
+    for step in range(1, RATE + 1):
+        assert (await limiter.check("a", now=step * DRAIN)).allowed is True
+
+
+async def test_a_long_silence_does_not_bank_credit():
+    """An idle bucket is empty, not negative. Without the clamp, an address that went
+    quiet for a day would come back able to send an unbounded burst."""
+    limiter = _limiter()
+    await _fill(limiter)
+
+    for _ in range(CAPACITY):
+        assert (await limiter.check("a", now=PERIOD * 24)).allowed is True
+
+    assert (await limiter.check("a", now=PERIOD * 24)).allowed is False
+
+
+async def test_keys_do_not_share_a_bucket():
+    limiter = _limiter()
+    await _fill(limiter)
+
+    assert (await limiter.check("b", now=0.0)).allowed is True
+
+
+async def test_an_allowed_decision_asks_for_no_wait():
+    assert (await _limiter().check("a", now=0.0)) == Decision(allowed=True, retry_after=0.0)
+
+
+async def test_a_capacity_of_one_is_a_plain_rate_limit():
+    limiter = InMemoryLeakyBucket(rate=RATE, period_seconds=PERIOD, capacity=1)
+
+    assert (await limiter.check("a", now=0.0)).allowed is True
+    assert (await limiter.check("a", now=0.0)).allowed is False
+
+
+async def test_a_drained_bucket_is_forgotten():
+    """One entry per address ever seen would be an unbounded leak on a public endpoint."""
+    limiter = _limiter()
+    await limiter.check("a", now=0.0)
+
+    assert limiter.tracked_keys(now=0.0) == 1
+    assert limiter.tracked_keys(now=DRAIN * CAPACITY * 2) == 0
+
+
+async def test_a_nonsense_configuration_is_refused_at_construction():
+    """A limiter that permits nothing is a misconfiguration, and it should fail where it
+    is built rather than on the first request."""
+    for kwargs in [
+        {"rate": 0, "period_seconds": 60.0, "capacity": 1},
+        {"rate": 10, "period_seconds": 0.0, "capacity": 1},
+        {"rate": 10, "period_seconds": 60.0, "capacity": 0},
+    ]:
+        with pytest.raises(ValueError):
+            InMemoryLeakyBucket(**kwargs)

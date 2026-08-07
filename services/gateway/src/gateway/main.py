@@ -5,7 +5,7 @@ import httpx
 from deflect_common.auth import bearer_guard
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
-from deflect_common.ratelimit import SlidingWindowLimiter, edge_address
+from deflect_common.ratelimit import InMemoryLeakyBucket, Limiter, edge_address
 from deflect_common.sessions import RedisSessionStore, SessionStore
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 
@@ -33,17 +33,25 @@ require_service = bearer_guard(_settings.service_token, "service")
 
 # One limiter per named allowance. Keyed by the address the edge computed, which is not
 # the address uvicorn would have reported -- see edge_address.
-_limiters = {
-    "ask": SlidingWindowLimiter(_settings.ask_rate_limit_per_hour, Policy.WINDOW_SECONDS),
-    "login": SlidingWindowLimiter(Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS),
+#
+# ASK_BURST is passed as `capacity`: they are the same number seen from two sides. The
+# policy constant names what an operator cares about -- how big a burst is tolerated --
+# and the parameter names the mechanism that delivers it, the depth of the bucket.
+_limiters: dict[str, Limiter] = {
+    "ask": InMemoryLeakyBucket(
+        _settings.ask_rate_limit_per_hour, Policy.WINDOW_SECONDS, Policy.ASK_BURST
+    ),
+    "login": InMemoryLeakyBucket(
+        Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS, Policy.LOGIN_BURST
+    ),
 }
 
 
-def build_limiters() -> dict[str, SlidingWindowLimiter]:
+def build_limiters() -> dict[str, Limiter]:
     return _limiters
 
 
-LimitersDep = Annotated[dict[str, SlidingWindowLimiter], Depends(build_limiters)]
+LimitersDep = Annotated[dict[str, Limiter], Depends(build_limiters)]
 
 _UPSTREAMS = {
     "retrieval": _settings.retrieval_url,
@@ -82,11 +90,13 @@ def _handler_for(route: Route):
     ) -> Response:
         if route.limit is not None:
             address = edge_address(request, _settings.trusted_proxy_hops)
-            if not limiters[route.limit].check(address, time.monotonic()):
+            decision = await limiters[route.limit].check(address, time.monotonic())
+            if not decision.allowed:
                 raise HTTPException(
                     status_code=429,
                     detail="too many requests from this address",
-                    headers={"Retry-After": str(Policy.WINDOW_SECONDS)},
+                    # Computed, not assumed. Waiting this long genuinely works.
+                    headers={"Retry-After": str(max(1, int(decision.retry_after)))},
                 )
 
         if not await allowed(

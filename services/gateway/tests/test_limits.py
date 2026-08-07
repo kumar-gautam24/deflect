@@ -33,11 +33,13 @@ async def app():
 def _fresh_limiters():
     """A new set per test: a module-level singleton shared across a session makes one
     test's traffic another test's failure."""
-    from deflect_common.ratelimit import SlidingWindowLimiter
+    from deflect_common.ratelimit import InMemoryLeakyBucket
 
     return {
-        "ask": SlidingWindowLimiter(ASK_RATE, Policy.WINDOW_SECONDS),
-        "login": SlidingWindowLimiter(Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS),
+        "ask": InMemoryLeakyBucket(ASK_RATE, Policy.WINDOW_SECONDS, Policy.ASK_BURST),
+        "login": InMemoryLeakyBucket(
+            Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS, Policy.LOGIN_BURST
+        ),
     }
 
 
@@ -48,7 +50,7 @@ async def call(app, path: str, headers=None) -> httpx.Response:
 
 
 async def test_the_allowance_is_spent_and_then_refused(app):
-    for _ in range(ASK_RATE):
+    for _ in range(Policy.ASK_BURST):
         assert (await call(app, "/ask")).status_code != 429
 
     assert (await call(app, "/ask")).status_code == 429
@@ -63,10 +65,21 @@ async def test_a_refusal_carries_retry_after(app):
     assert int(response.headers["Retry-After"]) > 0
 
 
+async def test_the_advertised_wait_is_honest(app):
+    for _ in range(Policy.ASK_BURST):
+        await call(app, "/ask")
+
+    response = await call(app, "/ask")
+
+    assert response.status_code == 429
+    # An hour would be the old hardcoded answer; the real one is one emission interval.
+    assert int(response.headers["Retry-After"]) < Policy.WINDOW_SECONDS
+
+
 async def test_a_spoofed_forwarded_header_does_not_buy_a_fresh_allowance(app):
     """The regression test for edge_address. If the gateway believed the leftmost entry,
     each of these would be a new key and the limit would never bind."""
-    for i in range(ASK_RATE):
+    for i in range(Policy.ASK_BURST):
         response = await call(app, "/ask", headers={"X-Forwarded-For": f"9.9.9.{i}"})
         assert response.status_code != 429
 
@@ -86,7 +99,7 @@ async def test_a_spoofed_leading_entry_does_not_evade_the_trailing_trusted_one(a
     """
     monkeypatch.setattr(gateway_main._settings, "trusted_proxy_hops", 1)
 
-    for i in range(ASK_RATE):
+    for i in range(Policy.ASK_BURST):
         response = await call(
             app, "/ask", headers={"X-Forwarded-For": f"9.9.9.{i}, 203.0.113.9"}
         )
