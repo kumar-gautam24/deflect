@@ -20,8 +20,3 @@ class Policy:
     # Five wrong passwords is a person misremembering; more is someone guessing.
     LOCK_AFTER_FAILURES = 5
     LOCK_SECONDS = 15 * 60
-
-    # A backstop against CPU exhaustion, not the control -- account lockout is that, and
-    # it is per-account rather than per-address. Sized so that an attacker filling this
-    # bucket cannot also stop a legitimate admin logging in.
-    LOGIN_ATTEMPTS_PER_HOUR = 60

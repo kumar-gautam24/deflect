@@ -34,7 +34,7 @@ require_service = bearer_guard(_settings.service_token, "service")
 # One limiter per named allowance. Keyed by the address the edge computed, which is not
 # the address uvicorn would have reported -- see edge_address.
 _limiters = {
-    "ask": SlidingWindowLimiter(Policy.ASK_PER_HOUR, Policy.WINDOW_SECONDS),
+    "ask": SlidingWindowLimiter(_settings.ask_rate_limit_per_hour, Policy.WINDOW_SECONDS),
     "login": SlidingWindowLimiter(Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS),
 }
 

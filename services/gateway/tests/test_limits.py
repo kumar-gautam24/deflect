@@ -4,9 +4,13 @@ from deflect_common.sessions import FakeSessionStore
 from doubles import build_upstream
 from httpx import ASGITransport, AsyncClient
 
+import gateway.main as gateway_main
+from gateway.config import get_settings
 from gateway.main import app as gateway_app
 from gateway.main import build_client, build_limiters, build_sessions
 from gateway.policy import Policy
+
+ASK_RATE = get_settings().ask_rate_limit_per_hour
 
 
 @pytest_asyncio.fixture
@@ -32,7 +36,7 @@ def _fresh_limiters():
     from deflect_common.ratelimit import SlidingWindowLimiter
 
     return {
-        "ask": SlidingWindowLimiter(Policy.ASK_PER_HOUR, Policy.WINDOW_SECONDS),
+        "ask": SlidingWindowLimiter(ASK_RATE, Policy.WINDOW_SECONDS),
         "login": SlidingWindowLimiter(Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS),
     }
 
@@ -44,14 +48,14 @@ async def call(app, path: str, headers=None) -> httpx.Response:
 
 
 async def test_the_allowance_is_spent_and_then_refused(app):
-    for _ in range(Policy.ASK_PER_HOUR):
+    for _ in range(ASK_RATE):
         assert (await call(app, "/ask")).status_code != 429
 
     assert (await call(app, "/ask")).status_code == 429
 
 
 async def test_a_refusal_carries_retry_after(app):
-    for _ in range(Policy.ASK_PER_HOUR):
+    for _ in range(ASK_RATE):
         await call(app, "/ask")
 
     response = await call(app, "/ask")
@@ -62,7 +66,7 @@ async def test_a_refusal_carries_retry_after(app):
 async def test_a_spoofed_forwarded_header_does_not_buy_a_fresh_allowance(app):
     """The regression test for edge_address. If the gateway believed the leftmost entry,
     each of these would be a new key and the limit would never bind."""
-    for i in range(Policy.ASK_PER_HOUR):
+    for i in range(ASK_RATE):
         response = await call(app, "/ask", headers={"X-Forwarded-For": f"9.9.9.{i}"})
         assert response.status_code != 429
 
@@ -71,9 +75,31 @@ async def test_a_spoofed_forwarded_header_does_not_buy_a_fresh_allowance(app):
     assert response.status_code == 429
 
 
+async def test_a_spoofed_leading_entry_does_not_evade_the_trailing_trusted_one(app, monkeypatch):
+    """Every other test in this file runs under TRUSTED_PROXY_HOPS=0 (see conftest.py),
+    which is right for a bare in-process call but never exercises the production shape:
+    one real proxy in front, appending the address it saw the connection from. This test
+    overrides the hop count to 1 and sends a caller-supplied leading entry plus a fixed
+    trailing one, standing in for that append. The leading entry varies per request; if
+    the gateway kept believing it instead of the trailing one, each request would buy its
+    own fresh allowance and the limit would never bind.
+    """
+    monkeypatch.setattr(gateway_main._settings, "trusted_proxy_hops", 1)
+
+    for i in range(ASK_RATE):
+        response = await call(
+            app, "/ask", headers={"X-Forwarded-For": f"9.9.9.{i}, 203.0.113.9"}
+        )
+        assert response.status_code != 429
+
+    response = await call(app, "/ask", headers={"X-Forwarded-For": "9.9.9.250, 203.0.113.9"})
+
+    assert response.status_code == 429
+
+
 async def test_an_unguarded_route_is_not_limited(app):
     """Only routes naming a limiter are limited. /eval-runs is public and cheap."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
-        for _ in range(Policy.ASK_PER_HOUR + 5):
+        for _ in range(ASK_RATE + 5):
             assert (await c.get("/eval-runs")).status_code != 429

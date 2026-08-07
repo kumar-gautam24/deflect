@@ -43,15 +43,14 @@ class Settings(BaseSettings):
     # surface in production, where nobody is browsing them anyway.
     env: str = "development"
 
-    # Derived together, not independently. At the gemini-2.0-flash prices in
-    # telemetry.py a five-chunk question costs about $0.00055, so 500 a day caps a
-    # fully abused day near $0.28 -- roughly $8.50 a month sustained, an order of
-    # magnitude above real demo traffic.
+    # At the gemini-2.0-flash prices in telemetry.py a five-chunk question costs about
+    # $0.00055, so 500 a day caps a fully abused day near $0.28 -- roughly $8.50 a month
+    # sustained, an order of magnitude above real demo traffic.
     #
-    # 20 an hour over 24 hours is 480, just under the daily ceiling, so no single
-    # address can exhaust the budget in a day. Raising the hourly limit past 21 breaks
-    # that property; re-derive both together if either changes.
-    ask_rate_limit_per_hour: int = 20
+    # Sized against the gateway's ask_rate_limit_per_hour, not independently: 20 an hour
+    # over 24 hours is 480, just under this ceiling, so no single address can exhaust the
+    # budget in a day. Raising that hourly limit past 21 breaks the property; re-derive
+    # both together if either changes.
     ask_daily_limit: int = 500
 
 

@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     service_token: str = ""
     operator_token: str = ""
 
+    # Settings rather than a constant: this is the number an operator turns down when the
+    # provider bill starts climbing, and needing a deploy to do that defeats the point.
+    ask_rate_limit_per_hour: int = 20
+
     # How many proxies sit in front of this process. One on Render; zero locally, where
     # the fallback to the peer address is the right answer anyway.
     trusted_proxy_hops: int = 1

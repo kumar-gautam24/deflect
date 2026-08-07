@@ -6,15 +6,19 @@ nobody can safely change six months later.
 
 
 class Policy:
-    # Carried unchanged from the answer service, so moving the limit does not also
-    # change how much traffic an hour permits. Burst is new -- see below.
-    ASK_PER_HOUR = 20
+    # The /ask RATE is deliberately NOT here. It lives in Settings, because it is the one
+    # number an operator may want to turn down under load and a constant would mean a
+    # deploy to do it. The burst below is a design decision rather than an operational
+    # knob, so it stays a constant.
+    #
     # Five questions back to back is someone trying the demo, not abusing it. The old
     # sliding-window log allowed all twenty at once, so this is strictly smoother.
     ASK_BURST = 5
 
-    # Carried unchanged from auth. Sized so an attacker filling this bucket cannot also
-    # stop a legitimate admin logging in -- which is why it is not lower.
+    # Carried unchanged from auth. A backstop against CPU exhaustion, not the control --
+    # account lockout is that, and it is per-account rather than per-address. Sized so an
+    # attacker filling this bucket cannot also stop a legitimate admin logging in -- which
+    # is why it is not lower.
     LOGIN_PER_HOUR = 60
     LOGIN_BURST = 10
 
