@@ -9,6 +9,7 @@ from deflect_common.ratelimit import InMemoryLeakyBucket, Limiter, edge_address
 from deflect_common.sessions import RedisSessionStore, SessionStore
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 
+from gateway.breaker import CircuitBreaker
 from gateway.config import get_settings
 from gateway.policy import Policy
 from gateway.principal import allowed
@@ -72,6 +73,19 @@ def build_client() -> httpx.AsyncClient:
 SessionsDep = Annotated[SessionStore, Depends(build_sessions)]
 ClientDep = Annotated[httpx.AsyncClient, Depends(build_client)]
 
+# Routed through Depends rather than captured in a handler closure, same as sessions and
+# the client: a test that trips this breaker would otherwise leave it open for every test
+# that runs after it, since the module-level instance is shared for the life of the
+# process. Going through build_breaker lets a test swap in its own via dependency_overrides.
+_breaker = CircuitBreaker(Policy.BREAKER_FAILURES, Policy.BREAKER_COOLDOWN_SECONDS)
+
+
+def build_breaker() -> CircuitBreaker:
+    return _breaker
+
+
+BreakerDep = Annotated[CircuitBreaker, Depends(build_breaker)]
+
 
 def _handler_for(route: Route):
     """One handler per table entry, closed over its own Route.
@@ -86,6 +100,7 @@ def _handler_for(route: Route):
         sessions: SessionsDep,
         client: ClientDep,
         limiters: LimitersDep,
+        breaker: BreakerDep,
         authorization: Annotated[str | None, Header()] = None,
     ) -> Response:
         if route.limit is not None:
@@ -108,7 +123,20 @@ def _handler_for(route: Route):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        return await forward(route, request, _UPSTREAMS[route.upstream], client)
+        if breaker.is_open(route.upstream, time.monotonic()):
+            raise HTTPException(503, f"{route.upstream} is failing; not dialling it")
+
+        try:
+            response = await forward(route, request, _UPSTREAMS[route.upstream], client)
+        except HTTPException as exc:
+            # 502 and 504 are transport failures and count. An upstream that answered
+            # with a 4xx is healthy -- it just disagreed with the caller.
+            if exc.status_code in (502, 504):
+                breaker.record_failure(route.upstream, time.monotonic())
+            raise
+
+        breaker.record_success(route.upstream)
+        return response
 
     return handler
 
