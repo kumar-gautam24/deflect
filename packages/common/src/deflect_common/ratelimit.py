@@ -128,7 +128,11 @@ class Limiter(Protocol):
 
 
 class _LeakyBucket:
-    """The arithmetic, shared by both implementations so they cannot disagree.
+    """The arithmetic that `InMemoryLeakyBucket` calls directly and `RedisLeakyBucket`'s
+    Lua reimplements by hand -- Lua cannot call a Python method, so that duplication is
+    real and deliberate, not an oversight. Nothing here keeps the two from drifting apart
+    on its own; the agreement test in test_ratelimit.py, which drives both through the
+    same calls and diffs every decision, is what keeps them honest.
 
     A bucket of `capacity` units with a hole in it. Every request pours one unit in; the
     hole drains `rate` units per `period_seconds`, continuously. If a request would

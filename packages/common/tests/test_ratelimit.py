@@ -1,11 +1,15 @@
 from datetime import UTC, datetime
 
 import pytest
+import pytest_asyncio
+import redis.asyncio as aioredis
+import redis.exceptions
 from fastapi import Request
 
 from deflect_common.ratelimit import (
     Decision,
     InMemoryLeakyBucket,
+    RedisLeakyBucket,
     SlidingWindowLimiter,
     client_address,
     edge_address,
@@ -281,3 +285,59 @@ async def test_a_nonsense_configuration_is_refused_at_construction():
     ]:
         with pytest.raises(ValueError):
             InMemoryLeakyBucket(**kwargs)
+
+
+# A distinct prefix so this test cannot collide with a running service's keys, and so
+# cleanup can target exactly what it wrote -- never FLUSHDB, which would take the evals
+# and retrieval consumer groups down with it.
+_REDIS_URL = "redis://:dev-redis-password@localhost:6379/0"
+_AGREEMENT_PREFIX = "ratelimit-test:leaky-bucket-agreement:"
+
+
+@pytest_asyncio.fixture
+async def redis_client():
+    client = aioredis.from_url(_REDIS_URL, decode_responses=True)
+    try:
+        await client.ping()
+    except redis.exceptions.RedisError as cause:
+        # No Redis, no network: the project's suite has to run without either. evals
+        # carries the same shape of skip for the same reason.
+        pytest.skip(f"redis not reachable at {_REDIS_URL}: {cause}")
+
+    await client.delete(_AGREEMENT_PREFIX + "a")  # a prior failed run may have left it
+    yield client
+    await client.delete(_AGREEMENT_PREFIX + "a")
+    await client.aclose()
+
+
+async def test_redis_and_in_memory_buckets_agree(redis_client):
+    """_LEAK_LUA is a hand-written copy of _decide in another language -- Lua cannot call
+    the Python method, so the two bodies can only be kept honest by comparison, not by
+    sharing code. Driving both through an identical sequence of calls and diffing every
+    decision is that comparison; it is what would catch a clamp or an overflow comparison
+    edited in one language and not the other.
+    """
+    memory = InMemoryLeakyBucket(rate=RATE, period_seconds=PERIOD, capacity=CAPACITY)
+    on_redis = RedisLeakyBucket(
+        redis_client, rate=RATE, period_seconds=PERIOD, capacity=CAPACITY, prefix=_AGREEMENT_PREFIX
+    )
+
+    # Fill to capacity, hit the overflow point, walk forward through several sustained
+    # drain steps, then jump a long silence to exercise the clamp, and overflow again.
+    # The overflow point and a drain step are exactly where a `>` vs `>=` or a dropped
+    # tostring would show up as a mismatch between the two implementations.
+    now_values = (
+        [0.0] * CAPACITY
+        + [0.0]
+        + [DRAIN * i for i in range(1, RATE + 1)]
+        + [PERIOD * 24]
+        + [PERIOD * 24] * (CAPACITY - 1)
+        + [PERIOD * 24]
+    )
+
+    for now in now_values:
+        mem_decision = await memory.check("a", now=now)
+        redis_decision = await on_redis.check("a", now=now)
+
+        assert mem_decision.allowed == redis_decision.allowed
+        assert mem_decision.retry_after == pytest.approx(redis_decision.retry_after)
