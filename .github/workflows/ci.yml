@@ -133,11 +133,23 @@ jobs:
           # 8004 (auth) and 8000 (gateway) close a gap the auth sub-project left: without
           # them a broken auth image sailed through this job because nothing here ever
           # called it, and the gateway would have been no better watched.
+          # The inner loop must FAIL when it runs out of attempts, not fall through. It
+          # used to just move on, so a service that never booted was reported three steps
+          # later as "service answer is not running" from an unrelated exec -- which named
+          # the wrong step, blamed the wrong command, and hid the actual startup error in
+          # container logs nobody had a reason to read.
           for port in 8001 8002 8003 8004 8000; do
+            ready=""
             for attempt in $(seq 1 60); do
-              curl -sf "http://localhost:$port/ready" && break
+              curl -sf "http://localhost:$port/ready" && { ready=1; break; }
               sleep 5
             done
+            if [ -z "$ready" ]; then
+              echo "::error::no service answered /ready on port $port within five minutes"
+              docker compose ps
+              docker compose logs --tail 40
+              exit 1
+            fi
           done
 
       - name: Migrate and ingest the pinned corpus
