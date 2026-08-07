@@ -198,14 +198,16 @@ Two caveats that belong with this number rather than buried:
 web ──/api/ask──────> gateway ──> answer ──/search──> retrieval
 web ──/traces───────> gateway ──> answer
 web ──/eval-runs────> gateway ──> evals ──/answer──> answer
-web ──/api/auth/login, /auth/logout──────────────────────> auth  (direct, not through the gateway)
+web ──/api/auth/login, /auth/logout──────────────────────> gateway ──> auth
 ```
 
-Everything public-facing goes through the gateway except one thing: the web app's own
-login and logout calls still go straight to `auth`, because `auth` never stopped being
-directly reachable — see below. Service-to-service calls (`answer` → `retrieval`,
-`evals` → `answer`) are unchanged: they cross the private network directly, the same as
-before the gateway existed. The gateway fronts the public edge, not internal calls.
+`apps/web` talks to the gateway and nothing else — `GATEWAY_URL` is the only backend
+address it holds. Login and logout were the last exception (they called `auth` directly
+until this was caught and fixed) and now go through the gateway's own rate-limited
+`/auth/login` and session-guarded `/auth/logout` like everything else. Service-to-service
+calls (`answer` → `retrieval`, `evals` → `answer`) are unchanged: they cross the private
+network directly, the same as before the gateway existed — the gateway fronts the public
+edge, not internal calls.
 
 **This isn't the only door, and the README says so rather than implying otherwise.**
 `retrieval`, `answer`, `evals` and `auth` all remain `type: web` on Render — reachable at
@@ -214,11 +216,12 @@ was attempted and abandoned: Render Private Services need a paid instance type t
 couldn't be confirmed against the connected account, and guessing would have turned this
 paragraph into a claim the next reader has no way to check. So the gateway centralises
 policy and is the documented entry point, but it is a front door beside other doors, not
-the only one — which is exactly why the web app's own login form can still walk straight
-past it. What actually protects each service is unchanged by that: `principal_guard`
-resolves and checks every credential itself rather than trusting the gateway's verdict,
-and each service's own `ENV` check keeps its interactive docs off in production
-regardless of which door a request came through.
+the only one — a client that skips it and calls a service's public URL directly still
+gets a real answer, just without the gateway's rate limiting or circuit breaker. What
+actually protects each service is unchanged by that: `principal_guard` resolves and
+checks every credential itself rather than trusting the gateway's verdict, and each
+service's own `ENV` check keeps its interactive docs off in production regardless of
+which door a request came through.
 
 Database per service. No shared tables, no cross-service joins, and each service owns
 its own migrations. `packages/common` holds the wire schemas both sides of every call
@@ -425,20 +428,16 @@ can see where a login came from — recorded, not trusted for any decision. The 
 strips every inbound `X-Forwarded-*` header before dialling an upstream and sets none of
 its own, on purpose: nothing downstream is meant to trust a forwarded value it did not
 compute itself. `auth`'s login route records `request.client.host`, the address of
-whichever process opened the TCP connection to it directly. For a request that reaches
-`/auth/login` through the gateway's route table above, that process is the gateway, not
-the visitor — so `sessions.ip` now records the same private-network address for every
-login that arrives that way. The column still writes a value; it just no longer answers
-the question it was built to answer. (The web app's own login form still calls `auth`
-directly rather than through the gateway — see the request diagram above — so it is not
-exercising this path today. But the gateway's `/auth/login` is the documented public
-entry point, and this is what happens to anything that uses it, including that form the
-day it's pointed at the gateway too.) This is not fixed here, on purpose: the fix is
-either teach the gateway to compute and forward the real address the way the web BFF
-already does for `/ask`, and teach `auth` to trust it from that one edge — or accept the
-loss and drop the column, and say why in the code rather than let it keep implying data
-it no longer holds. Recording the choice is the point of this paragraph; making it isn't
-this task's job.
+whichever process opened the TCP connection to it directly. Login now reaches `/auth/login`
+through the gateway's route table above for every caller, including `apps/web`'s own login
+form — so that process is always the gateway, never the visitor, and `sessions.ip` records
+the same private-network address for every login. The column still writes a value; it just
+no longer answers the question it was built to answer. This is not fixed here, on purpose:
+the fix is either teach the gateway to compute and forward the real address the way the web
+BFF already does for `/ask`, and teach `auth` to trust it from that one edge — or accept the
+loss and drop the column, and say why in the code rather than let it keep implying data it
+no longer holds. Recording the choice is the point of this paragraph; making it isn't this
+task's job.
 
 Accounts are created with `python -m auth.cli create-admin --email you@example.com`. There
 is no signup route: this system has operators, not users.
@@ -524,10 +523,9 @@ npm run dev
    presents it and checks it on incoming calls. The gateway also takes
    `TRUSTED_PROXY_HOPS` (`1` on Render, where its own load balancer is the one hop in
    front) — see "The address the gateway trusts" below for why that number matters.
-3. **Vercel** — deploy `apps/web` with `GATEWAY_URL` set to the Render gateway URL (it
-   carries `/ask`, the traces page and the eval dashboard) and `AUTH_URL` set to the
-   auth service's own Render URL, because login and logout still call `auth` directly
-   rather than through the gateway — see the request diagram under Architecture. Plus
+3. **Vercel** — deploy `apps/web` with `GATEWAY_URL` set to the Render gateway URL. It's
+   the only backend address `apps/web` holds: `/ask`, the traces page, the eval dashboard,
+   and login/logout all go through it — see the request diagram under Architecture. Plus
    `SERVICE_TOKEN`: `/api/ask` refuses to proxy a question at all if it's unset.
 
 `WEB_ORIGIN` is what the answer service's CORS allowlist reads, so the deployed

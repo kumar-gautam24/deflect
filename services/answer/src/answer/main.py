@@ -13,7 +13,7 @@ from deflect_common.observability import RequestIdMiddleware, metrics_response
 from deflect_common.ratelimit import seconds_until_utc_midnight
 from deflect_common.schemas import AnswerRequest, AnswerResponse
 from deflect_common.sessions import RedisSessionStore, SessionStore
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
@@ -87,7 +87,6 @@ require_viewer = principal_guard(
 async def enforce_ask_limits(
     http: Request,
     session: SessionDep,
-    authorization: Annotated[str | None, Header()] = None,
 ) -> None:
     """Reject a question that would exceed the day's budget.
 

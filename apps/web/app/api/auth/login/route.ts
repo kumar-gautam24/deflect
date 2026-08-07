@@ -2,13 +2,13 @@ import { NextResponse } from "next/server";
 
 import { COOKIE_NAME, cookieOptions } from "@/lib/session";
 
-const AUTH_URL = process.env.AUTH_URL ?? "http://localhost:8004";
+const GATEWAY_URL = process.env.GATEWAY_URL ?? "http://localhost:8000";
 
 // The request body is forwarded untouched rather than parsed into {email, password} and
 // re-serialised: the password never becomes a named value here, so there is nothing in
 // this handler that could accidentally end up in a log line.
 export async function POST(request: Request) {
-  const upstream = await fetch(`${AUTH_URL}/auth/login`, {
+  const upstream = await fetch(`${GATEWAY_URL}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: await request.text(),
