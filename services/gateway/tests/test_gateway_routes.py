@@ -88,13 +88,30 @@ async def test_a_guarded_route_refuses_the_wrong_credential(app):
     assert response.status_code == 401
 
 
-async def test_an_admin_session_reaches_an_operator_route(app):
+async def test_an_admin_session_reaches_an_operator_route(app, upstream):
+    """The double has no /ingest route, so this is 404 either way -- proxied or refused at
+    401 before reaching the upstream. Asserting != 401 alone would pass for almost any
+    breakage that also happens to 404. What only a genuinely proxied request produces is
+    the upstream's own record of being asked for it, so assert on that instead.
+    """
     response = await call(
         app, "POST", "/ingest", headers={"Authorization": "Bearer admin-token"},
         json={"root": "/corpus"},
     )
 
-    assert response.status_code != 401
+    assert response.status_code == 404
+    assert upstream.state.seen_paths == ["/ingest"]
+
+
+async def test_a_minted_request_id_is_forwarded_to_the_upstream(app, upstream):
+    """RequestIdMiddleware mints an id when the caller sends none, and puts it on the
+    contextvar and the response -- but clean_request_headers only ever copies INBOUND
+    headers, so with no id supplied nothing carried the minted one to the upstream before
+    this fix. Proven live: one request logged a different id at the gateway and at evals.
+    """
+    response = await call(app, "GET", "/eval-runs")
+
+    assert upstream.state.seen_headers["x-request-id"] == response.headers["X-Request-ID"]
 
 
 async def test_health_and_ready_are_the_gateways_own(app):

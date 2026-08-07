@@ -6,6 +6,7 @@ checks the final body.
 """
 
 import httpx
+from deflect_common.logging import request_id
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
@@ -76,10 +77,21 @@ async def forward(
         pool=Policy.CONNECT_TIMEOUT,
     )
 
+    headers = clean_request_headers(request.headers)
+    # RequestIdMiddleware puts the id on a contextvar and on the RESPONSE, never on the
+    # inbound request, so a caller-supplied id survives clean_request_headers unchanged but
+    # a MINTED one -- the common case, every request the caller did not already tag -- had
+    # nothing to carry it here. Setting it from the contextvar covers both: for a
+    # caller-supplied id this is the same value already present, and for a minted one it is
+    # the only place that value exists before this call.
+    current_id = request_id.get()
+    if current_id:
+        headers["X-Request-ID"] = current_id
+
     upstream_request = client.build_request(
         request.method,
         f"{base_url}{request.url.path}",
-        headers=clean_request_headers(request.headers),
+        headers=headers,
         params=request.query_params,
         content=await request.body(),
         timeout=timeout,
