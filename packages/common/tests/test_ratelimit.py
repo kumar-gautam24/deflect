@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime
 
 import pytest
@@ -290,7 +291,13 @@ async def test_a_nonsense_configuration_is_refused_at_construction():
 # A distinct prefix so this test cannot collide with a running service's keys, and so
 # cleanup can target exactly what it wrote -- never FLUSHDB, which would take the evals
 # and retrieval consumer groups down with it.
-_REDIS_URL = "redis://:dev-redis-password@localhost:6379/0"
+#
+# The URL is an env var, defaulting to the local docker-compose instance, because CI's
+# Redis lives at the same host and port but is a *different* container -- see the
+# contracts job in ci.yml.
+_REDIS_URL = os.environ.get(
+    "RATELIMIT_TEST_REDIS_URL", "redis://:dev-redis-password@localhost:6379/0"
+)
 _AGREEMENT_PREFIX = "ratelimit-test:leaky-bucket-agreement:"
 
 
@@ -300,8 +307,16 @@ async def redis_client():
     try:
         await client.ping()
     except redis.exceptions.RedisError as cause:
-        # No Redis, no network: the project's suite has to run without either. evals
-        # carries the same shape of skip for the same reason.
+        # Skipping keeps the unit suite runnable without Redis for local development,
+        # but a check that can silently vanish is worthless -- which is exactly what
+        # happened: this test only ran when someone had Redis up locally, the contracts
+        # job never gave it one, and "1 skipped" went unnoticed on every push. CI sets
+        # REQUIRE_RATELIMIT_REDIS_CHECK so an unreachable Redis fails the build there
+        # instead, the same pattern REQUIRE_CORPUS_CHECK uses in evals/test_dataset.py.
+        if os.environ.get("REQUIRE_RATELIMIT_REDIS_CHECK"):
+            raise AssertionError(
+                f"redis required but unreachable at {_REDIS_URL}: {cause}"
+            ) from cause
         pytest.skip(f"redis not reachable at {_REDIS_URL}: {cause}")
 
     await client.delete(_AGREEMENT_PREFIX + "a")  # a prior failed run may have left it

@@ -63,9 +63,30 @@ jobs:
     # The wire schemas and the gate are the coupling point between services. A change
     # here breaks every service at once, so it gets a real suite of its own.
     runs-on: ubuntu-latest
+    services:
+      # _LEAK_LUA is a hand-written reimplementation of _decide in another language --
+      # Lua cannot call the Python method, so the only thing that keeps the two from
+      # drifting apart is test_redis_and_in_memory_buckets_agree, which was skipping on
+      # every single push because this job never gave it a Redis to reach. bitnami's
+      # image is used rather than the plain redis one because it reads REDIS_PASSWORD
+      # from the environment; the plain image has no way to take a password except a
+      # command-line arg, which the `services:` block cannot pass.
+      redis:
+        image: bitnami/redis:7.2
+        env:
+          REDIS_PASSWORD: dev-redis-password
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli -a dev-redis-password ping"
+          --health-interval 5s --health-retries 10
     env:
       SERVICE_TOKEN: ci-service-token
       OPERATOR_TOKEN: ci-operator-token
+      RATELIMIT_TEST_REDIS_URL: redis://:dev-redis-password@localhost:6379/0
+      # Turns "Redis unreachable" into a failure instead of a skip, the same pattern
+      # REQUIRE_CORPUS_CHECK uses below for the golden-dataset check: a guard that can
+      # silently vanish is worthless, and this one already did once.
+      REQUIRE_RATELIMIT_REDIS_CHECK: "1"
     defaults:
       run:
         working-directory: packages/common
