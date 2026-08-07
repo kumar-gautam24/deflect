@@ -2,10 +2,15 @@ import time
 from typing import Annotated
 
 import httpx
-from deflect_common.auth import bearer_guard
+from deflect_common.auth import bearer_guard, token_matches
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
-from deflect_common.ratelimit import InMemoryLeakyBucket, Limiter, edge_address
+from deflect_common.ratelimit import (
+    InMemoryLeakyBucket,
+    Limiter,
+    client_address,
+    edge_address,
+)
 from deflect_common.sessions import RedisSessionStore, SessionStore
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
 
@@ -104,7 +109,15 @@ def _handler_for(route: Route):
         authorization: Annotated[str | None, Header()] = None,
     ) -> Response:
         if route.limit is not None:
-            address = edge_address(request, _settings.trusted_proxy_hops)
+            # A caller holding the service token is our own BFF, which sees the real visitor
+            # and overwrites this header rather than relaying it -- so its leftmost entry is
+            # the visitor. Anyone else is untrusted and gets the entry our own proxy appended.
+            # `trusted_hops=2` is NOT an alternative fix for the BFF case: it would just move
+            # which position an attacker with two entries controls, not remove their control.
+            if token_matches(_settings.service_token, authorization):
+                address = client_address(request, trust_forwarded=True)
+            else:
+                address = edge_address(request, _settings.trusted_proxy_hops)
             decision = await limiters[route.limit].check(address, time.monotonic())
             if not decision.allowed:
                 raise HTTPException(

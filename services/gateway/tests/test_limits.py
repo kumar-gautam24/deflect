@@ -11,6 +11,7 @@ from gateway.main import build_client, build_limiters, build_sessions
 from gateway.policy import Policy
 
 ASK_RATE = get_settings().ask_rate_limit_per_hour
+SERVICE = {"Authorization": f"Bearer {get_settings().service_token}"}
 
 
 @pytest_asyncio.fixture
@@ -62,6 +63,9 @@ async def test_a_refusal_carries_retry_after(app):
 
     response = await call(app, "/ask")
 
+    # > 0 is guaranteed by the handler's own max(1, ...) and proves nothing about this
+    # response in particular; the status code is what proves a refusal actually happened.
+    assert response.status_code == 429
     assert int(response.headers["Retry-After"]) > 0
 
 
@@ -107,6 +111,48 @@ async def test_a_spoofed_leading_entry_does_not_evade_the_trailing_trusted_one(a
 
     response = await call(app, "/ask", headers={"X-Forwarded-For": "9.9.9.250, 203.0.113.9"})
 
+    assert response.status_code == 429
+
+
+async def test_a_service_token_caller_is_trusted_leftmost_behind_the_edge_proxy(app, monkeypatch):
+    """The exact production shape: the BFF authenticates with SERVICE_TOKEN and overwrites
+    X-Forwarded-For with the visitor's single real address; Render's own load balancer then
+    appends its own hop, making a two-entry header. Without the service-token check the
+    gateway would trust edge_address's rightmost entry -- the constant BFF egress hop --
+    and every visitor behind it would share one bucket, which is exactly C1.
+    """
+    monkeypatch.setattr(gateway_main._settings, "trusted_proxy_hops", 1)
+
+    for i in range(Policy.ASK_BURST):
+        response = await call(
+            app,
+            "/ask",
+            headers={"X-Forwarded-For": f"9.9.9.{i}, 203.0.113.9", **SERVICE},
+        )
+        assert response.status_code != 429
+
+    # A distinct visitor behind the same egress hop gets its own allowance rather than
+    # sharing whatever the trailing entry's bucket had already drained.
+    response = await call(
+        app, "/ask", headers={"X-Forwarded-For": "9.9.9.250, 203.0.113.9", **SERVICE}
+    )
+    assert response.status_code != 429
+
+
+async def test_a_service_token_caller_sharing_a_leftmost_entry_shares_one_bucket(
+    app, monkeypatch
+):
+    monkeypatch.setattr(gateway_main._settings, "trusted_proxy_hops", 1)
+
+    for _ in range(Policy.ASK_BURST):
+        response = await call(
+            app, "/ask", headers={"X-Forwarded-For": "9.9.9.9, 203.0.113.9", **SERVICE}
+        )
+        assert response.status_code != 429
+
+    response = await call(
+        app, "/ask", headers={"X-Forwarded-For": "9.9.9.9, 203.0.113.9", **SERVICE}
+    )
     assert response.status_code == 429
 
 
