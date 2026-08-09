@@ -8,9 +8,10 @@ from doubles import build_upstream
 from httpx import ASGITransport, AsyncClient
 
 import gateway.main as gateway_main
+from gateway.breaker import CircuitBreaker
 from gateway.config import get_settings
 from gateway.main import app as gateway_app
-from gateway.main import build_client, build_limiters, build_sessions
+from gateway.main import build_breaker, build_client, build_limiters, build_sessions
 from gateway.policy import Policy
 
 ASK_RATE = get_settings().ask_rate_limit_per_hour
@@ -29,6 +30,14 @@ async def app():
     # would never appear spent.
     limiters = _fresh_limiters()
     gateway_app.dependency_overrides[build_limiters] = lambda: limiters
+    # Same reasoning as _fresh_limiters, and the same pitfall test_breaker_wiring.py names:
+    # this fake upstream never returns a 502/504 so nothing here trips the breaker today,
+    # but without an override these tests would share gateway.main's module-level singleton
+    # with whatever else runs in this session. Built once and captured, not inside the
+    # lambda -- FastAPI calls the override fresh per request, and a lambda that constructs
+    # the breaker would hand each request its own amnesiac instance.
+    breaker = CircuitBreaker(Policy.BREAKER_FAILURES, Policy.BREAKER_COOLDOWN_SECONDS)
+    gateway_app.dependency_overrides[build_breaker] = lambda: breaker
     yield gateway_app
     gateway_app.dependency_overrides.clear()
     await client.aclose()

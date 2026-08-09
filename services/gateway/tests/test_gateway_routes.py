@@ -5,8 +5,10 @@ from deflect_common.sessions import FakeSessionStore
 from doubles import build_upstream
 from httpx import ASGITransport, AsyncClient
 
+from gateway.breaker import CircuitBreaker
 from gateway.main import app as gateway_app
-from gateway.main import build_client, build_sessions
+from gateway.main import build_breaker, build_client, build_sessions
+from gateway.policy import Policy
 
 SERVICE = {"Authorization": "Bearer test-service-token"}
 OPERATOR = {"Authorization": "Bearer test-operator-token"}
@@ -29,6 +31,14 @@ async def app(store, upstream):
     client = AsyncClient(transport=ASGITransport(app=upstream), base_url="http://upstream")
     gateway_app.dependency_overrides[build_sessions] = lambda: store
     gateway_app.dependency_overrides[build_client] = lambda: client
+    # This fake upstream never returns a 502/504, so nothing here trips the breaker today --
+    # but without an override these tests would share gateway.main's module-level singleton
+    # with whatever else runs in the same session. Built once and captured, not inside the
+    # lambda: FastAPI calls the override fresh per request, and a lambda that constructs the
+    # breaker would hand each request its own amnesiac instance (test_breaker_wiring.py names
+    # this exact pitfall).
+    breaker = CircuitBreaker(Policy.BREAKER_FAILURES, Policy.BREAKER_COOLDOWN_SECONDS)
+    gateway_app.dependency_overrides[build_breaker] = lambda: breaker
     yield gateway_app
     gateway_app.dependency_overrides.clear()
     await client.aclose()
