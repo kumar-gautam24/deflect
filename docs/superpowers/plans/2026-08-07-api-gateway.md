@@ -456,9 +456,11 @@ nobody can safely change six months later.
 
 
 class Policy:
-    # Carried unchanged from the answer service, so moving the limit does not also
-    # change how much traffic an hour permits. Burst is new -- see below.
-    ASK_PER_HOUR = 20
+    # The /ask RATE is deliberately NOT here. It lives in Settings, because it is the one
+    # number an operator may want to turn down under load and a constant would mean a
+    # deploy to do it. The burst below is a design decision rather than an operational
+    # knob, so it stays a constant.
+    #
     # Five questions back to back is someone trying the demo, not abusing it. The old
     # sliding-window log allowed all twenty at once, so this is strictly smoother.
     ASK_BURST = 5
@@ -503,6 +505,10 @@ class Settings(BaseSettings):
 
     service_token: str = ""
     operator_token: str = ""
+
+    # Settings rather than a constant: this is the number an operator turns down when the
+    # provider bill starts climbing, and needing a deploy to do that defeats the point.
+    ask_rate_limit_per_hour: int = 20
 
     # How many proxies sit in front of this process. One on Render; zero locally, where
     # the fallback to the peer address is the right answer anyway.
@@ -624,11 +630,24 @@ from fastapi.responses import JSONResponse, StreamingResponse
 def build_upstream() -> FastAPI:
     app = FastAPI()
     app.state.seen_headers = {}
+    app.state.seen_paths = []
     app.state.release = asyncio.Event()
+
+    @app.middleware("http")
+    async def record(request: Request, call_next):
+        """Record EVERY request, not only the ones this double has a route for.
+
+        Recording inside a handler can only ever see paths the double defines, so a test
+        asserting "the upstream was never called" would pass identically when the upstream
+        WAS called on a path it happens not to serve -- which is exactly the regression
+        those tests exist to catch.
+        """
+        app.state.seen_paths.append(request.url.path)
+        app.state.seen_headers = dict(request.headers)
+        return await call_next(request)
 
     @app.api_route("/echo", methods=["GET", "POST"])
     async def echo(request: Request) -> JSONResponse:
-        app.state.seen_headers = dict(request.headers)
         return JSONResponse(
             {"path": request.url.path, "query": str(request.url.query), "body": (await request.body()).decode()}
         )
@@ -661,9 +680,11 @@ def build_upstream() -> FastAPI:
 `services/gateway/tests/test_proxy.py`:
 
 ```python
+import asyncio
+
 import httpx
-import pytest
 import pytest_asyncio
+import uvicorn
 from doubles import build_upstream
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
@@ -721,18 +742,6 @@ async def test_the_body_survives(gateway):
     assert response.json()["body"] == '{"a":1}'
 
 
-async def test_an_upstream_error_is_relayed_not_replaced(gateway, upstream):
-    """A 418 from a service is that service's answer. Replacing it with 502 would hide a
-    real response behind a transport error."""
-    gateway.add_api_route(
-        "/boom",
-        lambda request: forward(Route("GET", "/boom", "answer", None, timeout=5), request,
-                                "http://upstream", request.app.state.client),
-        methods=["GET"],
-    )
-    # The route above needs the client on app.state; simpler path is asserted below.
-
-
 async def test_the_callers_authorization_is_passed_through_unchanged(gateway, upstream):
     """The gateway must not swap in its own token: the upstream re-resolves the caller,
     and that is the whole defence-in-depth argument."""
@@ -754,12 +763,65 @@ async def test_a_client_supplied_deflect_header_never_reaches_the_upstream(gatew
     assert "x-deflect-principal" not in upstream.state.seen_headers
 
 
-async def test_a_streamed_response_is_not_buffered(gateway, upstream):
+async def _serve(app) -> tuple[uvicorn.Server, asyncio.Task, str]:
+    """Run an app on a real socket on an ephemeral port."""
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
+    task = asyncio.create_task(server.serve())
+    while not server.started:
+        await asyncio.sleep(0.01)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    return server, task, f"http://127.0.0.1:{port}"
+
+
+async def _stop(server: uvicorn.Server, task: asyncio.Task) -> None:
+    server.should_exit = True
+    await task
+
+
+@pytest_asyncio.fixture
+async def live_pair():
+    """A real upstream and a real gateway, each on its own ephemeral port.
+
+    ASGITransport cannot prove anything about buffering. It drives the whole ASGI app to
+    completion and collects the body BEFORE send() returns, so a test that waits for a
+    first frame before releasing the upstream deadlocks against the transport rather than
+    against the gateway -- and would deadlock identically whether or not the gateway
+    buffers, which makes it worthless as evidence.
+
+    This is the same limitation that made the uvicorn forwarded-header defect untestable
+    in-process: an in-process transport is not HTTP, and the two places this project
+    genuinely depends on HTTP behaviour both need a socket.
+    """
+    upstream_app = build_upstream()
+    upstream_server, upstream_task, upstream_url = await _serve(upstream_app)
+
+    client = AsyncClient(base_url=upstream_url)
+    gateway_app = FastAPI()
+
+    async def handler(request: Request):
+        return await forward(STREAM, request, upstream_url, client)
+
+    gateway_app.add_api_route("/slow-stream", handler, methods=["GET"])
+    gateway_server, gateway_task, gateway_url = await _serve(gateway_app)
+
+    yield upstream_app, gateway_url
+
+    await client.aclose()
+    await _stop(gateway_server, gateway_task)
+    await _stop(upstream_server, upstream_task)
+
+
+async def test_a_streamed_response_is_not_buffered(live_pair):
     """The failure mode a naive proxy has by default, invisible until a user waits thirty
-    seconds for a first token. The upstream blocks after one frame, so receiving that
-    frame proves the gateway did not wait for the whole body."""
-    transport = ASGITransport(app=gateway)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    seconds for a first token.
+
+    The upstream emits one frame and then blocks until this test releases it. Receiving
+    that frame therefore proves the gateway forwarded it without waiting for the body to
+    finish -- and if the gateway buffered, this test would time out rather than pass.
+    """
+    upstream_app, gateway_url = live_pair
+
+    async with AsyncClient(base_url=gateway_url, timeout=10) as c:
         async with c.stream("GET", "/slow-stream") as response:
             first = None
             async for chunk in response.aiter_bytes():
@@ -767,7 +829,7 @@ async def test_a_streamed_response_is_not_buffered(gateway, upstream):
                 break
 
             assert first is not None and b"first" in first
-            upstream.state.release.set()
+            upstream_app.state.release.set()
 
 
 def test_hop_by_hop_headers_are_dropped():
@@ -788,7 +850,9 @@ def test_the_host_header_is_dropped():
     assert "host" not in cleaned
 ```
 
-Delete `test_an_upstream_error_is_relayed_not_replaced` — it is superseded by the cleaner version added in Step 4. It is listed here only so the plan's reader sees why it was dropped rather than wondering where it went.
+The two upstream-failure tests need their own app rather than the shared `gateway` fixture, so they are added in Step 5 once `forward` exists. Everything above uses the fixture.
+
+**Note the split, and do not collapse it.** Every test except the streaming one runs in-process through `ASGITransport`, which is fast and sufficient for headers, status and body. The streaming test alone runs over real sockets, because `ASGITransport` drives the whole app to completion before `send()` returns — an in-process no-buffering test deadlocks against the transport and proves nothing either way. Verified empirically against httpx 0.28.1 before this plan was written.
 
 - [ ] **Step 3: Run to verify failure**
 
@@ -904,9 +968,9 @@ async def forward(
     )
 ```
 
-- [ ] **Step 5: Replace the placeholder error test**
+- [ ] **Step 5: Add the two upstream-failure tests**
 
-In `tests/test_proxy.py`, delete `test_an_upstream_error_is_relayed_not_replaced` and add:
+Append to `tests/test_proxy.py`:
 
 ```python
 async def test_an_upstream_error_status_is_relayed_rather_than_replaced(upstream):
@@ -1215,8 +1279,12 @@ async def store():
 
 
 @pytest_asyncio.fixture
-async def app(store):
-    upstream = build_upstream()
+async def upstream():
+    return build_upstream()
+
+
+@pytest_asyncio.fixture
+async def app(store, upstream):
     client = AsyncClient(transport=ASGITransport(app=upstream), base_url="http://upstream")
     gateway_app.dependency_overrides[build_sessions] = lambda: store
     gateway_app.dependency_overrides[build_client] = lambda: client
@@ -1231,27 +1299,40 @@ async def call(app, method: str, path: str, **kwargs) -> httpx.Response:
         return await c.request(method, path, **kwargs)
 
 
-async def test_metrics_is_not_routable_to_an_upstream(app):
-    """It is absent from the table, so it cannot be reached even by a caller holding the
-    right token. The gateway's own /metrics is a different route, added below."""
-    response = await call(app, "GET", "/metrics", headers=SERVICE)
+async def test_metrics_never_reaches_an_upstream(app, upstream):
+    """/metrics is absent from the route table, so it is unroutable rather than guarded.
+    The gateway's own /metrics is a separate route; what must never happen is a proxied
+    request to a service's /metrics.
 
-    assert response.status_code in (200, 401)
-    # 200 only from the gateway's OWN metrics; never a proxied upstream body.
-    assert "path" not in response.text
+    Asserted on the upstream's record of every path it was asked for, not on the response
+    body — a substring check there collides with the gateway's own metric names, and
+    seen_headers alone would be vacuous because the double only sets it for paths it
+    actually serves.
+    """
+    await call(app, "GET", "/metrics", headers=SERVICE)
+
+    assert upstream.state.seen_paths == []
 
 
-async def test_an_unknown_path_is_a_404_before_any_upstream_call(app):
+async def test_an_unknown_path_is_a_404_before_any_upstream_call(app, upstream):
     response = await call(app, "GET", "/nope", headers=OPERATOR)
 
     assert response.status_code == 404
+    assert upstream.state.seen_paths == []
 
 
-async def test_an_upstream_docs_path_is_not_routed(app):
+async def test_an_upstream_docs_path_is_not_routed(app, upstream):
+    """Same reasoning. /redoc and /openapi.json belong to the gateway's own FastAPI app
+    when ENV is not production, and must never become a proxied request to a service.
+
+    Not asserted on the body: FastAPI puts every handler's docstring into the OpenAPI
+    schema, so any word this codebase uses in a docstring — "upstream" among them — will
+    appear in /openapi.json for reasons that have nothing to do with routing.
+    """
     for path in ["/redoc", "/openapi.json"]:
-        response = await call(app, "GET", path, headers=OPERATOR)
-        assert response.status_code in (200, 404)
-        assert "upstream" not in response.text
+        await call(app, "GET", path, headers=OPERATOR)
+
+    assert upstream.state.seen_paths == []
 
 
 async def test_a_guarded_route_refuses_a_missing_credential(app):
@@ -1460,9 +1541,12 @@ from deflect_common.sessions import FakeSessionStore
 from doubles import build_upstream
 from httpx import ASGITransport, AsyncClient
 
+from gateway.config import get_settings
 from gateway.main import app as gateway_app
 from gateway.main import build_client, build_limiters, build_sessions
 from gateway.policy import Policy
+
+ASK_RATE = get_settings().ask_rate_limit_per_hour
 
 
 @pytest_asyncio.fixture
@@ -1483,7 +1567,7 @@ def _fresh_limiters():
     from deflect_common.ratelimit import SlidingWindowLimiter
 
     return {
-        "ask": SlidingWindowLimiter(Policy.ASK_PER_HOUR, Policy.WINDOW_SECONDS),
+        "ask": SlidingWindowLimiter(ASK_RATE, Policy.WINDOW_SECONDS),
         "login": SlidingWindowLimiter(Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS),
     }
 
@@ -1495,14 +1579,14 @@ async def call(app, path: str, headers=None) -> httpx.Response:
 
 
 async def test_the_allowance_is_spent_and_then_refused(app):
-    for _ in range(Policy.ASK_PER_HOUR):
+    for _ in range(ASK_RATE):
         assert (await call(app, "/ask")).status_code != 429
 
     assert (await call(app, "/ask")).status_code == 429
 
 
 async def test_a_refusal_carries_retry_after(app):
-    for _ in range(Policy.ASK_PER_HOUR):
+    for _ in range(ASK_RATE):
         await call(app, "/ask")
 
     response = await call(app, "/ask")
@@ -1513,7 +1597,7 @@ async def test_a_refusal_carries_retry_after(app):
 async def test_a_spoofed_forwarded_header_does_not_buy_a_fresh_allowance(app):
     """The regression test for edge_address. If the gateway believed the leftmost entry,
     each of these would be a new key and the limit would never bind."""
-    for i in range(Policy.ASK_PER_HOUR):
+    for i in range(ASK_RATE):
         response = await call(app, "/ask", headers={"X-Forwarded-For": f"9.9.9.{i}"})
         assert response.status_code != 429
 
@@ -1526,7 +1610,7 @@ async def test_an_unguarded_route_is_not_limited(app):
     """Only routes naming a limiter are limited. /eval-runs is public and cheap."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
-        for _ in range(Policy.ASK_PER_HOUR + 5):
+        for _ in range(ASK_RATE + 5):
             assert (await c.get("/eval-runs")).status_code != 429
 ```
 
@@ -1553,7 +1637,7 @@ Add after `require_service`:
 # One limiter per named allowance. Keyed by the address the edge computed, which is not
 # the address uvicorn would have reported -- see edge_address.
 _limiters = {
-    "ask": SlidingWindowLimiter(Policy.ASK_PER_HOUR, Policy.WINDOW_SECONDS),
+    "ask": SlidingWindowLimiter(_settings.ask_rate_limit_per_hour, Policy.WINDOW_SECONDS),
     "login": SlidingWindowLimiter(Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS),
 }
 
@@ -1950,7 +2034,9 @@ In `services/gateway/src/gateway/main.py`, replace the limiter construction:
 # policy constant names what an operator cares about -- how big a burst is tolerated --
 # and the parameter names the mechanism that delivers it, the depth of the bucket.
 _limiters: dict[str, Limiter] = {
-    "ask": InMemoryLeakyBucket(Policy.ASK_PER_HOUR, Policy.WINDOW_SECONDS, Policy.ASK_BURST),
+    "ask": InMemoryLeakyBucket(
+        _settings.ask_rate_limit_per_hour, Policy.WINDOW_SECONDS, Policy.ASK_BURST
+    ),
     "login": InMemoryLeakyBucket(
         Policy.LOGIN_PER_HOUR, Policy.WINDOW_SECONDS, Policy.LOGIN_BURST
     ),
@@ -1978,7 +2064,7 @@ Update the imports accordingly and delete the `SlidingWindowLimiter` import.
 
 - [ ] **Step 6: Update the gateway's limit tests**
 
-In `services/gateway/tests/test_limits.py`, change `_fresh_limiters` to build `InMemoryLeakyBucket` with the burst values as `capacity`, and change `test_the_allowance_is_spent_and_then_refused` to spend `Policy.ASK_BURST` rather than `Policy.ASK_PER_HOUR` requests. Add:
+In `services/gateway/tests/test_limits.py`, change `_fresh_limiters` to build `InMemoryLeakyBucket` with the burst values as `capacity`, and change `test_the_allowance_is_spent_and_then_refused` to spend `Policy.ASK_BURST` rather than `ASK_RATE` requests. Add:
 
 ```python
 async def test_the_advertised_wait_is_honest(app):

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated
 
-from deflect_common.auth import principal_guard, token_matches
+from deflect_common.auth import principal_guard
 from deflect_common.llm.base import LLMClient, get_client
 from deflect_common.logging import configure_logging
 from deflect_common.observability import RequestIdMiddleware, metrics_response
@@ -18,7 +18,7 @@ from deflect_common.ratelimit import (
 )
 from deflect_common.schemas import AnswerRequest, AnswerResponse
 from deflect_common.sessions import RedisSessionStore, SessionStore
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
@@ -89,31 +89,44 @@ require_viewer = principal_guard(
     "viewer", _settings.service_token, _settings.operator_token, build_sessions
 )
 
-# One limiter for the process. Per-process state means each instance counts separately
-# and a redeploy grants a fresh allowance; see ratelimit.py for why that is accepted.
-_ask_limiter = SlidingWindowLimiter(
-    limit=get_settings().ask_rate_limit_per_hour, window_seconds=3600
-)
+# A CPU/spend backstop for the direct door -- see ask_backstop_per_hour in config.py for
+# why the number is generous rather than precise. Built once at module scope and exposed
+# through Depends, the same shape as _sessions and the breaker elsewhere in this codebase:
+# a `lambda: SlidingWindowLimiter(...)` override would hand each request a fresh, empty
+# limiter and the backstop could never actually trip.
+_ask_backstop = SlidingWindowLimiter(_settings.ask_backstop_per_hour, window_seconds=3600)
+
+
+def build_ask_backstop() -> SlidingWindowLimiter:
+    return _ask_backstop
+
+
+AskBackstopDep = Annotated[SlidingWindowLimiter, Depends(build_ask_backstop)]
 
 
 async def enforce_ask_limits(
     http: Request,
     session: SessionDep,
-    authorization: Annotated[str | None, Header()] = None,
+    backstop: AskBackstopDep,
 ) -> None:
-    """Reject an abusive question before it reaches a model.
+    """Reject a question that would exceed the backstop or the day's budget.
 
-    Ordered cheapest first: the per-address window is a dict lookup, the daily cap is a
-    database query.
+    The precise per-visitor window moved to the gateway, where one address means one
+    visitor. Two controls remain here, for the door the gateway does not actually
+    guard: the backstop below, keyed on the true peer because this service is still
+    reachable directly and cannot tell the gateway's own traffic apart from anyone
+    else's; and the daily spend cap, unaffected by who called it because it counts rows
+    in this service's own traces table.
     """
     settings = get_settings()
-    trusted = token_matches(settings.service_token, authorization)
-    address = client_address(http, trust_forwarded=trusted)
-
-    if not _ask_limiter.check(address, time.monotonic()):
+    address = client_address(http, trust_forwarded=False)
+    if not backstop.check(address, time.monotonic()):
         raise HTTPException(
             status_code=429,
-            detail="too many questions from this address",
+            detail="too many requests from this address",
+            # SlidingWindowLimiter has no notion of a partial wait, only allowed or not --
+            # the full window is the honest answer here, the same as the daily cap below
+            # before the gateway's leaky bucket could compute one by division.
             headers={"Retry-After": "3600"},
         )
 

@@ -21,7 +21,14 @@ class Policy:
     LOCK_AFTER_FAILURES = 5
     LOCK_SECONDS = 15 * 60
 
-    # A backstop against CPU exhaustion, not the control -- account lockout is that, and
-    # it is per-account rather than per-address. Sized so that an attacker filling this
-    # bucket cannot also stop a legitimate admin logging in.
-    LOGIN_ATTEMPTS_PER_HOUR = 60
+    # A CPU/spend backstop for the direct door, not the precise control -- the gateway's
+    # own per-visitor login bucket (60/hour, burst 10) is that. This service stayed
+    # type: web on Render, because the private split needs a paid plan that could not be
+    # confirmed, so /auth/login is reachable directly and every attempt still runs a full
+    # argon2id hash regardless of who dialled it. Keyed on the true peer, which cannot
+    # distinguish the gateway's own traffic from anyone else's -- the gateway forwards
+    # whatever credential the caller sent rather than proving its own identity, so every
+    # request the gateway relays looks identical to this check and must never trip it.
+    # Set an order of magnitude above the gateway's per-visitor limit rather than trying
+    # to match it.
+    LOGIN_BACKSTOP_PER_HOUR = 600

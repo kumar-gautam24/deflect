@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 
 import { COOKIE_NAME, cookieOptions } from "@/lib/session";
 
-const AUTH_URL = process.env.AUTH_URL ?? "http://localhost:8004";
+const GATEWAY_URL = process.env.GATEWAY_URL ?? "http://localhost:8000";
 
 // A user who clicks log out must end up logged out of this browser even if the auth
 // service is unreachable, so the upstream revoke is attempted but never allowed to
@@ -13,7 +13,7 @@ export async function POST() {
 
   if (token) {
     try {
-      await fetch(`${AUTH_URL}/auth/logout`, {
+      await fetch(`${GATEWAY_URL}/auth/logout`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });

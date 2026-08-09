@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deflect — HLD &amp; LLD</title>
+<meta name="description" content="High-level and low-level design for Deflect: five services, the trust model, the leaky bucket, and an honest account of what is still open.">
+<link rel="stylesheet" href="styles.css">
+<style>
+  /* Standalone-only chrome. The artifact runtime supplies its own theme control, so
+     this lives here rather than in the shared stylesheet. */
+  #theme-toggle{position:fixed;top:16px;right:16px;z-index:10;
+    font-family:var(--mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase;
+    padding:7px 13px;border:1px solid var(--line);border-radius:2px;
+    background:var(--surface);color:var(--fg-2);cursor:pointer}
+  #theme-toggle:hover{color:var(--brass);border-color:var(--brass)}
+  #theme-toggle:focus-visible{outline:2px solid var(--brass);outline-offset:3px}
+  @media print{#theme-toggle{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<button id="theme-toggle" type="button" aria-pressed="false"
+          aria-label="Switch between light and dark">Dark</button>
+
+
+<header class="mast">
+  <p class="eyebrow">Deflect · Architecture Reference</p>
+  <h1>Five services, four databases,<br>and one <em>front door</em>.</h1>
+  <p class="standfirst">A retrieval-augmented question answering system over FastAPI's own documentation. This is the high-level design and the low-level design in one document: what the pieces are, why the boundaries fall where they do, and how each part actually works.</p>
+  <div class="facts">
+    <div class="fact"><b>5</b><span>services</span></div>
+    <div class="fact"><b>4</b><span>databases</span></div>
+    <div class="fact"><b>155</b><span>documents</span></div>
+    <div class="fact"><b>2,372</b><span>chunks</span></div>
+    <div class="fact"><b>80</b><span>golden items</span></div>
+    <div class="fact"><b>459</b><span>tests</span></div>
+  </div>
+</header>
+
+<div class="cols">
+  <nav class="rail">
+    <div class="grp">High level</div>
+    <a href="#what">What it does</a>
+    <a href="#corpus">The corpus</a>
+    <a href="#topology">Topology</a>
+    <a href="#paths">Three paths</a>
+    <a href="#invariants">Invariants</a>
+    <a href="#trust">Trust model</a>
+    <div class="grp">Low level</div>
+    <a href="#gateway">Gateway</a>
+    <a href="#limiter">Leaky bucket</a>
+    <a href="#address">Client address</a>
+    <a href="#auth">Sessions</a>
+    <a href="#jobs">Job queue</a>
+    <a href="#rag">Retrieval &amp; gate</a>
+    <a href="#data">Data model</a>
+    <div class="grp">Reality</div>
+    <a href="#state">Current state</a>
+  </nav>
+
+  <main>
+
+<section id="what">
+  <h2><span class="num">HLD 01</span>What it does</h2>
+  <p class="lede">Deflect answers questions about FastAPI by retrieving passages from FastAPI's documentation and asking a model to answer <em>from those passages only</em> — then refusing when the retrieved context isn't good enough.</p>
+  <p>The refusal is the point, and it's where the name comes from. A RAG system that always answers is easy; one that reliably says <strong>"I don't know"</strong> when the corpus doesn't cover the question is the hard part, and it's what the eval harness measures.</p>
+  <p>The system began as a modular monolith, still tagged <code>monolith-phase1</code>. Both shapes are kept deliberately so the split can be argued rather than assumed.</p>
+</section>
+
+<section id="corpus">
+  <h2><span class="num">HLD 02</span>The corpus</h2>
+  <p>The <strong>corpus</strong> is the body of documents the system retrieves from — here, FastAPI's own docs. CI clones <code>github.com/fastapi/fastapi</code> and ingests <code>docs/en/docs</code>; locally that is 155 markdown files producing 2,372 chunks.</p>
+  <p>It is <strong>pinned to a commit SHA</strong> on every ingest. That's what makes eval scores comparable: a faithfulness score only means something if you know which version of the documents produced it.</p>
+
+  <h4>Chunking</h4>
+  <p>Chunks follow markdown headings rather than a fixed token window, and each chunk keeps its heading path — <code>Tutorial &gt; Dependencies &gt; Sub-dependencies</code>. That path is what lets a citation name something a human can actually navigate to, instead of "chunk 1,847".</p>
+</section>
+
+<section id="topology">
+  <h2><span class="num">HLD 03</span>Topology</h2>
+  <div class="fig">
+    <div class="fig-cap">Figure 1 — services, stores, and who talks to whom</div>
+    <div class="fig-body">
+<pre class="mermaid">
+graph TB
+  B["Browser"] --> W["web · Next.js on Vercel<br/>BFF: cookie to Bearer"]
+  W --> G["gateway :8000<br/>routing · rate limit · breaker<br/><i>no database</i>"]
+  G --> R["retrieval :8001"]
+  G --> A["answer :8002"]
+  G --> E["evals :8003"]
+  G --> U["auth :8004"]
+  R --- RD[("deflect_retrieval<br/>documents · chunks")]
+  A --- AD[("deflect_answer<br/>traces · escalations")]
+  E --- ED[("deflect_evals<br/>eval_runs · eval_results")]
+  U --- UD[("deflect_auth<br/>admin_users · sessions")]
+  A --> R
+  E --> A
+  RW["retrieval-worker"] --- RD
+  EW["evals-worker"] --- ED
+  RS[("Redis<br/>streams · session cache")] --- RW
+  RS --- EW
+  RS --- G
+  RS --- U
+  A --> LLM["Groq"]
+  E --> LLM
+</pre>
+    </div>
+  </div>
+
+  <div class="tw"><table>
+    <thead><tr><th>Service</th><th class="m">Port</th><th>Database</th><th>Owns</th></tr></thead>
+    <tbody>
+      <tr><td class="m">gateway</td><td class="m">8000</td><td class="m">—</td><td>Routing and edge policy. Owns no data.</td></tr>
+      <tr><td class="m">retrieval</td><td class="m">8001</td><td class="m">deflect_retrieval</td><td><code>documents</code>, <code>chunks</code>, <code>ingest_jobs</code></td></tr>
+      <tr><td class="m">answer</td><td class="m">8002</td><td class="m">deflect_answer</td><td><code>traces</code>, <code>escalations</code></td></tr>
+      <tr><td class="m">evals</td><td class="m">8003</td><td class="m">deflect_evals</td><td><code>eval_runs</code>, <code>eval_results</code>, <code>eval_item_jobs</code></td></tr>
+      <tr><td class="m">auth</td><td class="m">8004</td><td class="m">deflect_auth</td><td><code>admin_users</code>, <code>sessions</code></td></tr>
+      <tr><td class="m">web</td><td class="m">3000</td><td class="m">—</td><td>UI and backend-for-frontend</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note">
+    <span class="lbl">Why the gateway has no database</span>
+    <p>The rule is <em>a service that owns data owns its database</em> — not <em>every service has one</em>. Giving the gateway a database to satisfy a pattern would invert the invariant rather than follow it. Its only state is rate-limit counters, in Redis.</p>
+  </div>
+</section>
+
+<section id="paths">
+  <h2><span class="num">HLD 04</span>Three request paths</h2>
+  <p>Everything the system does is one of three shapes: a synchronous streamed answer, or one of two long jobs that outlived the request that started them.</p>
+
+  <h3>1 · Ask — synchronous, streamed</h3>
+  <div class="fig">
+    <div class="fig-cap">Figure 2 — POST /ask, streamed end to end</div>
+    <div class="fig-body">
+<pre class="mermaid">
+sequenceDiagram
+  participant B as Browser
+  participant W as web BFF
+  participant G as gateway
+  participant A as answer
+  participant R as retrieval
+  participant L as Groq
+  B->>W: POST /api/ask
+  W->>G: POST /ask + SERVICE_TOKEN, X-Forwarded-For
+  G->>G: rate limit, route lookup, breaker
+  G->>A: POST /ask (credential unchanged)
+  A->>R: POST /search
+  R-->>A: top-k chunks + scores
+  A->>A: confidence gate
+  alt gate passes
+    A->>L: prompt with retrieved context
+    L-->>A: tokens
+    A-->>G: SSE tokens
+    G-->>W: SSE (never buffered)
+    W-->>B: SSE
+  else gate fails
+    A-->>B: escalation, no model call
+  end
+  A->>A: write trace row
+</pre>
+    </div>
+  </div>
+
+  <h3>2 · Ingest — a job</h3>
+  <p><code>POST /ingest</code> returns <span class="pill">202</span> with a job id. The retrieval service writes an <code>ingest_jobs</code> row, then publishes to a Redis Stream; <code>retrieval-worker</code> consumes it, embeds ~2,372 chunks, and updates the row. Progress is readable at <code>GET /jobs/{id}</code> and streamed at <code>/jobs/{id}/events</code>.</p>
+
+  <h3>3 · Eval run — a job, fanned out</h3>
+  <p><code>POST /runs</code> returns <span class="pill">202</span>. Each of the 80 golden items becomes its own queued job; <code>evals-worker</code> answers and judges each one, and a fan-in finalises the run when the last item lands.</p>
+
+  <div class="note">
+    <span class="lbl">Why a broker exists here at all</span>
+    <p>A full eval run is roughly two hours against a free-tier quota. During development that run was destroyed twice — once by a container rebuild, once by a client timeout — losing about 45 minutes each time. Parallel workers do <em>not</em> make a run faster; the provider's rate limit is the ceiling. What the queue buys is retry granularity, visible progress, and survival across a restart.</p>
+  </div>
+  <p><strong>Redis carries work; Postgres carries truth.</strong> Every piece of job state lives in the owning service's own database, so job status still answers when the broker is down, and there is still no shared table between services.</p>
+</section>
+
+<section id="invariants">
+  <h2><span class="num">HLD 05</span>Invariants</h2>
+  <p>These are the rules the design will not trade. Breaking one to save effort destroys what the repository is meant to demonstrate.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Invariant</th><th>What it rules out</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Database per service</strong></td><td>No shared tables, no cross-service joins, each service owns its migrations. This is why a shared <code>api_keys</code> table was rejected during auth design.</td></tr>
+      <tr><td><strong><code>packages/common</code> is the only coupling point</strong></td><td>Wire schemas live there so a contract change breaks compilation instead of failing at runtime. It imports nothing from any service.</td></tr>
+      <tr><td><strong>Shared libraries take credentials explicitly</strong></td><td>A library used by five services cannot reach into one service's settings singleton.</td></tr>
+      <tr><td><strong>Misconfiguration fails at startup</strong></td><td>Services refuse to boot without their tokens or provider key, so a bad deploy never takes traffic.</td></tr>
+      <tr><td><strong>No infrastructure the system has no use for</strong></td><td>No service mesh, no Kubernetes, no distributed tracing backend. The broker earned its place only after the synchronous version failed twice in practice.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="trust">
+  <h2><span class="num">HLD 06</span>Trust model</h2>
+  <p>One header, <code>Authorization: Bearer &lt;value&gt;</code>, carries three kinds of credential. A shared resolver decides which was presented and what it satisfies.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Required</th><th>SERVICE_TOKEN</th><th>OPERATOR_TOKEN</th><th>session · admin</th><th>session · viewer</th></tr></thead>
+    <tbody>
+      <tr><td class="m">service</td><td class="yes">allow</td><td class="no">refuse</td><td class="no">refuse</td><td class="no">refuse</td></tr>
+      <tr><td class="m">operator</td><td class="no">refuse</td><td class="yes">allow</td><td class="yes">allow</td><td class="no">refuse</td></tr>
+      <tr><td class="m">viewer</td><td class="no">refuse</td><td class="yes">allow</td><td class="yes">allow</td><td class="yes">allow</td></tr>
+      <tr><td class="m">session</td><td class="no">refuse</td><td class="no">refuse</td><td class="yes">allow</td><td class="yes">allow</td></tr>
+    </tbody>
+  </table></div>
+  <p>A service token deliberately does <strong>not</strong> satisfy <code>operator</code>. Machines and operators are different principals, and collapsing them would let any service trigger spend. <code>session</code> is a gateway-only requirement about credential <em>kind</em> rather than privilege level — <code>/auth/logout</code> revokes a session row, and a token has none to revoke.</p>
+
+  <div class="note">
+    <span class="lbl">Defence in depth, deliberately</span>
+    <p>The gateway resolves the credential and refuses obvious traffic early, then forwards the caller's <strong>original credential unchanged</strong>. Every upstream service re-resolves it with its own guard. Nothing is deleted and nothing is weakened, so a request that reaches a service another way is still checked. The rejected alternative — terminating at the gateway and passing an <code>X-Deflect-Principal</code> header — would rest every service's security on that header being unforgeable, which is a defect class this project has already fixed once.</p>
+  </div>
+</section>
+
+<hr>
+
+<section id="gateway">
+  <h2><span class="num">LLD 01</span>Gateway internals</h2>
+  <p>Five modules, each with one job and testable alone.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Module</th><th>Responsibility</th><th>Depends on</th></tr></thead>
+    <tbody>
+      <tr><td class="m">routes.py</td><td>The route table, as data</td><td class="m">dataclasses only</td></tr>
+      <tr><td class="m">proxy.py</td><td>Streaming passthrough, header hygiene, 502/504</td><td class="m">routes, httpx</td></tr>
+      <tr><td class="m">principal.py</td><td>Coarse allow/deny, then forward untouched</td><td class="m">deflect_common.auth</td></tr>
+      <tr><td class="m">breaker.py</td><td>Per-upstream circuit breaker</td><td class="m">policy</td></tr>
+      <tr><td class="m">policy.py</td><td>Constants, each with its reason</td><td class="m">—</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>The route table is the design</h3>
+  <p><code>routes.py</code> imports nothing but <code>dataclasses</code>. It is the artifact a reviewer reads to answer "what is exposed, and to whom" — replacing a posture you'd otherwise assemble by reading decorators across four services.</p>
+<pre><span class="cmt"># 17 rows. A path absent from this table is unroutable,</span>
+<span class="cmt"># which is stronger than a path that is merely guarded.</span>
+Route(<span class="kw">"POST"</span>, <span class="kw">"/ask"</span>,     <span class="kw">"answer"</span>,    <span class="kw">None</span>,       timeout=30, stream=<span class="kw">True</span>, limit=<span class="kw">"ask"</span>)
+Route(<span class="kw">"POST"</span>, <span class="kw">"/auth/login"</span>, <span class="kw">"auth"</span>,   <span class="kw">None</span>,       timeout=10, limit=<span class="kw">"login"</span>)
+Route(<span class="kw">"GET"</span>,  <span class="kw">"/auth/me"</span>,    <span class="kw">"auth"</span>,   <span class="kw">"session"</span>,  timeout=10)
+Route(<span class="kw">"GET"</span>,  <span class="kw">"/traces"</span>,     <span class="kw">"answer"</span>, <span class="kw">"viewer"</span>)
+Route(<span class="kw">"POST"</span>, <span class="kw">"/search"</span>,     <span class="kw">"retrieval"</span>, <span class="kw">"service"</span>)
+Route(<span class="kw">"POST"</span>, <span class="kw">"/ingest"</span>,     <span class="kw">"retrieval"</span>, <span class="kw">"operator"</span>)
+Route(<span class="kw">"POST"</span>, <span class="kw">"/runs"</span>,       <span class="kw">"evals"</span>,     <span class="kw">"operator"</span>)
+Route(<span class="kw">"GET"</span>,  <span class="kw">"/eval-runs"</span>,  <span class="kw">"evals"</span>,     <span class="kw">None</span>)</pre>
+  <p><code>/metrics</code> appears nowhere, so it is <em>unroutable</em> rather than protected — a later mis-wired guard cannot expose it. Each row is registered with <code>app.add_api_route</code> through a closure factory, so FastAPI does the path parsing and produces correct 404/405.</p>
+
+  <h3>Streaming, not buffering</h3>
+  <p>The proxy uses <code>client.send(request, stream=True)</code> with <code>StreamingResponse(upstream.aiter_raw())</code> and a <code>BackgroundTask(upstream.aclose)</code>. Without that background close, every proxied request leaks a pooled connection.</p>
+  <p><code>aiter_raw</code> rather than <code>aiter_bytes</code> is deliberate: <code>aiter_bytes</code> would decompress the body while the relayed <code>content-encoding</code> header still claimed it was encoded.</p>
+
+  <h4>Failure translation</h4>
+  <div class="tw"><table>
+    <thead><tr><th class="m">Condition</th><th class="m">Reply</th><th>Reasoning</th></tr></thead>
+    <tbody>
+      <tr><td class="m">unreachable</td><td class="m">502</td><td>Distinct from an upstream that answered with an error, which is relayed as-is</td></tr>
+      <tr><td class="m">timeout</td><td class="m">504</td><td>A gateway that hangs turns one slow service into an exhausted edge</td></tr>
+      <tr><td class="m">rate limited</td><td class="m">429</td><td>With a computed <code>Retry-After</code></td></tr>
+      <tr><td class="m">not in table</td><td class="m">404</td><td>Refused before any upstream call</td></tr>
+      <tr><td class="m">repeated failure</td><td class="m">503</td><td>Circuit open — fail fast</td></tr>
+    </tbody>
+  </table></div>
+  <p>The <code>except</code> ordering is load-bearing: <code>httpx.TimeoutException</code> is a subclass of <code>httpx.HTTPError</code>, so the 504 branch must come first or every timeout would report as unreachable.</p>
+
+  <h3>Circuit breaker</h3>
+  <p>Five <strong>consecutive</strong> failures open an upstream's circuit for 30 seconds. Consecutive rather than cumulative: a service that fails once a day is healthy, and a running total would eventually open the circuit on one that never had a problem. A relayed 4xx does not count — the upstream answered, it just disagreed with the caller. Only the proxy's own 502/504 translations do.</p>
+  <p>The breaker's purpose is <em>not</em> protecting the upstream. It keeps the gateway's workers available for the upstreams that are still healthy; without it every worker blocks on the same sick service and one outage becomes total.</p>
+</section>
+
+<section id="limiter">
+  <h2><span class="num">LLD 02</span>The leaky bucket</h2>
+  <p>A bucket of <code>capacity</code> units with a hole in it. Each request pours in one unit; the hole drains at the sustained rate, continuously. Refused when it would overflow — and how long until it fits is division, not a guess.</p>
+<pre>leak_per_second = rate / period          <span class="cmt"># 20/3600 = one unit per 180s</span>
+level = max(0.0, stored_level - elapsed * leak_per_second)
+
+allowed     = level + 1 &lt;= capacity
+retry_after = (level + 1 - capacity) / leak_per_second</pre>
+
+  <div class="tw"><table>
+    <thead><tr><th>Route</th><th class="n">Rate</th><th class="n">Burst</th><th>Where the number lives</th></tr></thead>
+    <tbody>
+      <tr><td class="m">/ask</td><td class="n">20 / hr</td><td class="n">5</td><td>Settings — an operator turns this down under load</td></tr>
+      <tr><td class="m">/auth/login</td><td class="n">60 / hr</td><td class="n">10</td><td>Constant — sized against the account lockout</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note">
+    <span class="lbl">Why a level, not GCRA</span>
+    <p>The same algorithm is often written as GCRA, tracking the next permitted arrival time in one float instead of two. It is exactly equivalent — <code>level = (tat − now) / emission</code>. The level form is used anyway: a bucket that drains is something a reader can picture at three in the morning, and a "theoretical arrival time" is something they have to look up. The saved float isn't worth the opacity.</p>
+  </div>
+
+  <p>The <strong>clamp at zero is load-bearing</strong>. Without <code>max(0.0, …)</code>, an address that goes quiet for a day banks credit and returns able to send an unbounded burst.</p>
+  <p>Two implementations satisfy one protocol: <code>InMemoryLeakyBucket</code> and <code>RedisLeakyBucket</code>. The Redis one is a single Lua script — atomic without a pipeline round trip. Floats cross the Lua boundary as strings, because Redis coerces Lua numbers to integers and this algorithm is entirely fractional seconds. The Lua is a genuine hand-written reimplementation, not shared code, so an agreement test drives both through the same call sequence and asserts identical decisions.</p>
+</section>
+
+<section id="address">
+  <h2><span class="num">LLD 03</span>Which address to trust</h2>
+  <p>Two functions, deliberately, because the rules genuinely differ — and a boolean flag would invite a future caller to pick the wrong one silently.</p>
+  <div class="tw"><table>
+    <thead><tr><th class="m">Function</th><th>Takes</th><th>Correct when</th></tr></thead>
+    <tbody>
+      <tr><td class="m">client_address</td><td>the <strong>leftmost</strong> XFF entry</td><td>The only trusted forwarder <em>overwrites</em> the header rather than relaying it — which the web BFF does.</td></tr>
+      <tr><td class="m">edge_address</td><td>the <strong>rightmost</strong> (n-from-right)</td><td>You are the public edge behind a load balancer that <em>appends</em> the real client to whatever the caller sent.</td></tr>
+    </tbody>
+  </table></div>
+<pre><span class="cmt"># client sends:  X-Forwarded-For: 9.9.9.9</span>
+<span class="cmt"># Render yields: X-Forwarded-For: 9.9.9.9, &lt;real client&gt;</span>
+<span class="cmt">#                                 ^^^^^^^ attacker-controlled</span></pre>
+  <p>Taking the leftmost entry at an edge would let any caller mint a fresh rate-limit key per request, and the limiter would be decorative. The <code>trusted_hops &gt;= 1</code> guard is also load-bearing: Python's <code>entries[-0]</code> is <code>entries[0]</code> — the spoofable end.</p>
+  <div class="note warn">
+    <span class="lbl">The counter-intuitive flag</span>
+    <p>Every service, <strong>including the gateway</strong>, runs with <code>--forwarded-allow-ips ""</code>. uvicorn's default rewrites <code>request.client</code> from the leftmost XFF entry <em>before the application runs</em>. The gateway parses the header itself and takes the rightmost, so uvicorn must be told to leave <code>request.client</code> alone rather than helpfully corrupting it first.</p>
+  </div>
+</section>
+
+<section id="auth">
+  <h2><span class="num">LLD 04</span>Sessions and passwords</h2>
+  <p>Passwords are argon2id. Sessions are opaque — 32 random bytes, stored only as a SHA-256, so a dump of the database yields nothing replayable.</p>
+  <p><strong>Postgres is the record; Redis is the working copy.</strong> On login the auth service writes the session row and sets <code>session:&lt;sha256&gt;</code> in Redis. Other services read only Redis, so none depends on auth being reachable to serve its own data — you simply cannot log in while it is down.</p>
+  <div class="note">
+    <span class="lbl">The TTL is the session's own lifetime</span>
+    <p>The cache entry carries the full remaining lifetime, not a short cache TTL. A shorter one is tempting as a revocation backstop, but since this is the only place a service looks, it would not bound revocation — it would quietly <em>become</em> the session length, logging an admin out everywhere while their cookie and database row both still called the session live. Revocation is therefore the explicit delete on logout.</p>
+  </div>
+  <h4>Lockout</h4>
+  <p>Five wrong passwords lock an account for fifteen minutes. A locked account is refused with the <strong>same 401, same body, no <code>Retry-After</code></strong> as a wrong password: the lockout is reachable only for an account that exists, so any distinguishable reply would answer "is this address an admin?" in five requests. The operator learns of it from a log line carrying the user id — never the email.</p>
+  <p>Accounts are created by CLI (<code>python -m auth.cli create-admin</code>), never by an endpoint. This system has operators, not users.</p>
+</section>
+
+<section id="jobs">
+  <h2><span class="num">LLD 05</span>Job queue</h2>
+  <p>Redis Streams with consumer groups. The pattern is identical for both job types.</p>
+<pre><span class="cmt"># 1. write the row FIRST, then enqueue</span>
+job = IngestJob(status=<span class="kw">"queued"</span>, root=..., commit_sha=...)
+session.add(job); <span class="kw">await</span> session.flush()
+<span class="kw">await</span> queue.publish(INGEST_STREAM, job.id)</pre>
+  <p>Order matters: a job that exists in Redis must always have a row behind it, or the worker has work referencing nothing. The reverse order would leave the queue holding ids that resolve to no state.</p>
+  <p>Workers acknowledge only after committing the result. A process that dies mid-job leaves its message unacknowledged, and the message returns to the group once something is consuming again — which is why the workers carry <code>restart: unless-stopped</code>.</p>
+  <p>The eval run fans out one job per golden item and fans back in on a count: the run finalises when the last item lands, computed from the database rather than held in memory, so a restart cannot lose the tally.</p>
+</section>
+
+<section id="rag">
+  <h2><span class="num">LLD 06</span>Retrieval and the confidence gate</h2>
+  <p>Retrieval is vector search over pgvector, with a reranker. The gate is what makes the system refuse.</p>
+  <div class="tw"><table>
+    <thead><tr><th class="m">Signal</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td class="m">top_score</td><td>How well the best chunk matches. Below <code>min_top_score</code>, nothing retrieved is relevant enough to answer from.</td></tr>
+      <tr><td class="m">margin</td><td>Gap between best and second-best. A narrow margin means the retriever is guessing between passages.</td></tr>
+    </tbody>
+  </table></div>
+  <p>Failing either threshold produces an <strong>escalation</strong> rather than an answer, and the model is never called — which is a cost control as much as a quality one. The thresholds are recorded on every trace, so an eval run knows what configuration produced its numbers instead of assuming today's.</p>
+  <p>Citations are validated against what was actually retrieved: a citation naming a chunk that was not in the context is dropped rather than shown. A model that invents a plausible source is exactly the failure the gate exists to catch.</p>
+  <h4>Spend controls</h4>
+  <p>Two bounds, sized against each other: 20 questions per hour per address, and 500 per day counted from the <code>traces</code> table. Twenty an hour over 24 hours is 480 — just under the daily ceiling, so no single address can exhaust a day's budget. Only the daily cap is a true spend bound; a botnet has many real addresses.</p>
+</section>
+
+<section id="data">
+  <h2><span class="num">LLD 07</span>Data model</h2>
+  <div class="tw"><table>
+    <thead><tr><th>Table</th><th>Service</th><th>Notable columns and constraints</th></tr></thead>
+    <tbody>
+      <tr><td class="m">documents</td><td class="m">retrieval</td><td><code>source_path</code>, <code>commit_sha</code>, <code>title</code></td></tr>
+      <tr><td class="m">chunks</td><td class="m">retrieval</td><td>embedding vector, heading path, FK to document</td></tr>
+      <tr><td class="m">ingest_jobs</td><td class="m">retrieval</td><td><code>status</code>, <code>attempts</code>, <code>commit_sha</code></td></tr>
+      <tr><td class="m">traces</td><td class="m">answer</td><td>question, answer, <code>top_score</code>, <code>margin</code>, tokens, cost, <code>min_top_score</code>, <code>min_margin</code></td></tr>
+      <tr><td class="m">escalations</td><td class="m">answer</td><td>FK to trace, reason</td></tr>
+      <tr><td class="m">eval_runs</td><td class="m">evals</td><td><code>git_sha</code>, prompt/judge version, metrics JSON, <code>items_total</code></td></tr>
+      <tr><td class="m">eval_results</td><td class="m">evals</td><td>unique <code>(run_id, item_id)</code>, faithfulness, hit@5, MRR</td></tr>
+      <tr><td class="m">admin_users</td><td class="m">auth</td><td>argon2id hash, role, <code>locked_until</code>, unique index on <code>lower(email)</code></td></tr>
+      <tr><td class="m">sessions</td><td class="m">auth</td><td>SHA-256 <code>token_hash</code>, <code>expires_at</code>, <code>revoked_at</code>, partial index on live rows</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note">
+    <span class="lbl">The index that isn't a performance index</span>
+    <p><code>admin_users_email_lower_idx</code> is the <em>only</em> thing enforcing case-insensitive email uniqueness — the plain <code>UNIQUE</code> on <code>email</code> is case-sensitive. Without it <code>You@x.com</code> and <code>you@x.com</code> could both exist, and one of them could never log in reliably. It's declared on the model as well as in the migration, so <code>alembic --autogenerate</code> can't silently propose dropping it.</p>
+  </div>
+</section>
+
+<hr>
+
+<section id="state">
+  <h2><span class="num">Reality</span>Where this actually stands</h2>
+  <p class="lede">A design document that only describes the intended system is half a document. This is what is true as of 9 August 2026.</p>
+
+  <h3>Working</h3>
+  <ul>
+    <li><strong>End to end, verified live.</strong> <code>POST /ask</code> through the gateway streams SSE token by token from the FastAPI corpus.</li>
+    <li>459 tests green across seven suites (plus 1 skip in evals) — gateway 74, common 114, retrieval 70, answer 55, evals 82+1 skip, auth 43, web 21.</li>
+    <li>The gateway branch is complete: routing, principals, streaming proxy, leaky bucket, circuit breaker, deployment.</li>
+    <li><strong>Both Criticals below were found and repaired</strong> by a whole-branch review after all ten task-scoped reviews came back clean — the same pattern as sub-project C, and the reason that pass exists.</li>
+  </ul>
+
+  <h3>Open, and known</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Issue</th><th>Impact</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Fixed — CI had never passed.</strong> Three unrelated causes, each hiding the next: no <code>GROQ_API_KEY</code> secret, so <code>evals-worker</code> refused to boot; the readiness wait exhausted its retries and then <em>fell through</em> rather than failing; and the Redis added for the Lua agreement test used an image tag whose manifest no longer exists.</td><td>All eight jobs now green, <code>eval-smoke</code> in 6m26s against the 18-minute timeout it used to burn. The readiness loop now fails on the port that never answered and prints container states and logs — previously a dead service surfaced three steps later as <code>service "answer" is not running</code>, naming the wrong step and hiding the real error. <strong>Still true for forks:</strong> a pull request from outside cannot see the secret, so <code>eval-smoke</code> will fail there rather than skip.</td></tr>
+      <tr><td><strong>Fixed — the <code>/ask</code> limit keyed on the BFF, not the visitor.</strong> The BFF overwrites XFF with one entry; Render appends its own, so <code>edge_address</code> returned the Vercel egress node and every visitor shared one bucket.</td><td>The handler now trusts the leftmost entry only for a caller holding <code>SERVICE_TOKEN</code> — the BFF proving it computed the address itself rather than relayed it — and falls back to <code>edge_address</code> for everyone else. Proven load-bearing: reverting the change made the new regression test fail before the fix was restored.</td></tr>
+      <tr><td><strong>Fixed — moving the limiters had removed them from two public routes.</strong> The Render private split needs a paid plan that could not be confirmed, so all four services stayed directly reachable, and <code>/ask</code> and <code>/auth/login</code> were the only routes with no guard at all. Measured: 9 direct logins to <code>:8004</code> returned 401 nine times with no throttle; the same 9 through the gateway hit 429 at the sixth.</td><td>Each service now keeps a coarse <code>SlidingWindowLimiter</code> backstop of its own again, keyed on the true peer rather than a header — an order of magnitude above the gateway's own per-visitor limit so it never bites traffic the gateway already allowed (<code>answer.ask_backstop_per_hour</code> = 200, <code>auth.Policy.LOGIN_BACKSTOP_PER_HOUR</code> = 600). The gateway's limiter stays the precise control; this is the CPU/spend bound for the door that is still public.</td></tr>
+      <tr><td><code>sessions.ip</code> now records the gateway's address, not the caller's.</td><td>An audit column became a constant. Documented, not yet fixed.</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note">
+    <span class="lbl">On the gateway's justification</span>
+    <p>The gateway is here for <strong>breadth</strong> — this project exists for a resume, and demonstrating one has value it wouldn't have in a product. The four-origin problem it was pointed at is real. But unlike the message broker, which earned its place after two eval runs were destroyed in practice, <em>nothing forced this one</em>. It was chosen, not forced, and the README says so.</p>
+  </div>
+</section>
+
+<hr>
+<footer>Deflect · github.com/kumar-gautam24/deflect · architecture reference, 7 Aug 2026</footer>
+
+  </main>
+</div>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -234,14 +234,29 @@ Limits move as follows:
 
 | limit | today | after |
 | --- | --- | --- |
-| per-address `/ask` window | `answer` | gateway |
-| per-address login window | `auth` | gateway |
+| precise, per-visitor `/ask` window | `answer` | gateway |
+| precise, per-visitor login window | `auth` | gateway |
 | daily `/ask` spend cap | `answer` | **stays in `answer`** |
 
 The daily cap stays because it counts rows in `answer`'s own `traces` table and is a spend
 bound, not an abuse bound. The general rule worth writing down: *a rate limit is about volume
 arriving from the public, which only the edge sees; an authorisation check is about
 correctness, which must hold everywhere.*
+
+**That rule assumed the edge was the only public door, and it was not.** `retrieval`,
+`answer`, `evals` and `auth` all stayed `type: web` on Render — the private split this
+reasoning depends on needs a paid plan that could not be confirmed — so `/ask` and
+`/auth/login` are reachable directly, and each is precisely the route with no
+`principal_guard` to fall back on. Measured after the fact: 9 direct logins to `:8004`
+returned 401 nine times with no throttle at all, while the same 9 through the gateway hit
+429 at the sixth. The fix is not to move the limit back — the gateway's is still the only
+*precise* one, keyed on the actual visitor — but to leave a coarse backstop behind in each
+service, keyed on the true peer rather than a header neither service can tell the
+gateway's traffic apart from anyone else's by. Sized an order of magnitude above the
+gateway's own per-visitor limit so it never bites traffic the gateway already allowed:
+`answer.ask_backstop_per_hour` (200) and `auth.Policy.LOGIN_BACKSTOP_PER_HOUR` (600). This
+is the same shape the daily cap already has — a control that stays local because only the
+local service can enforce it — just added rather than assumed away.
 
 ## Failure handling
 

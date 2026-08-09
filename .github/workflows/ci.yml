@@ -10,7 +10,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [retrieval, answer, evals, auth]
+        # gateway has no database of its own -- it only ever talks to the other four --
+        # so the database and migration steps below are skipped for it rather than run
+        # against a schema that does not exist.
+        service: [retrieval, answer, evals, auth, gateway]
     services:
       db:
         image: pgvector/pgvector:pg16
@@ -38,6 +41,7 @@ jobs:
       - run: uv sync
 
       - name: Create this service's databases
+        if: matrix.service != 'gateway'
         run: |
           psql "postgresql://deflect:deflect@localhost:5432/postgres" \
             -c "CREATE DATABASE deflect_${{ matrix.service }}"
@@ -45,7 +49,9 @@ jobs:
             -c "CREATE DATABASE deflect_${{ matrix.service }}_test"
 
       - run: uv run alembic upgrade head
+        if: matrix.service != 'gateway'
       - name: Migrate the test database
+        if: matrix.service != 'gateway'
         run: uv run alembic upgrade head
         env:
           DATABASE_URL: postgresql+asyncpg://deflect:deflect@localhost:5432/deflect_${{ matrix.service }}_test
@@ -57,9 +63,32 @@ jobs:
     # The wire schemas and the gate are the coupling point between services. A change
     # here breaks every service at once, so it gets a real suite of its own.
     runs-on: ubuntu-latest
+    services:
+      # _LEAK_LUA is a hand-written reimplementation of _decide in another language --
+      # Lua cannot call the Python method, so the only thing that keeps the two from
+      # drifting apart is test_redis_and_in_memory_buckets_agree, which was skipping on
+      # every single push because this job never gave it a Redis to reach.
+      #
+      # No password here, unlike docker-compose. A `services:` container cannot take a
+      # command, so the plain image has no way to be told --requirepass, and the
+      # passworded alternatives are third-party tags that go away (bitnami/redis:7.2 was
+      # tried and its manifest no longer exists). The password locally guards a Redis
+      # published on a host port that decides who is logged in; this one lives for the
+      # length of one job, is reachable only from it, and holds two float counters.
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-retries 10
     env:
       SERVICE_TOKEN: ci-service-token
       OPERATOR_TOKEN: ci-operator-token
+      RATELIMIT_TEST_REDIS_URL: redis://localhost:6379/0
+      # Turns "Redis unreachable" into a failure instead of a skip, the same pattern
+      # REQUIRE_CORPUS_CHECK uses below for the golden-dataset check: a guard that can
+      # silently vanish is worthless, and this one already did once.
+      REQUIRE_RATELIMIT_REDIS_CHECK: "1"
     defaults:
       run:
         working-directory: packages/common
@@ -103,11 +132,26 @@ jobs:
 
       - name: Wait for every service to report healthy
         run: |
-          for port in 8001 8002 8003; do
+          # 8004 (auth) and 8000 (gateway) close a gap the auth sub-project left: without
+          # them a broken auth image sailed through this job because nothing here ever
+          # called it, and the gateway would have been no better watched.
+          # The inner loop must FAIL when it runs out of attempts, not fall through. It
+          # used to just move on, so a service that never booted was reported three steps
+          # later as "service answer is not running" from an unrelated exec -- which named
+          # the wrong step, blamed the wrong command, and hid the actual startup error in
+          # container logs nobody had a reason to read.
+          for port in 8001 8002 8003 8004 8000; do
+            ready=""
             for attempt in $(seq 1 60); do
-              curl -sf "http://localhost:$port/ready" && break
+              curl -sf "http://localhost:$port/ready" && { ready=1; break; }
               sleep 5
             done
+            if [ -z "$ready" ]; then
+              echo "::error::no service answered /ready on port $port within five minutes"
+              docker compose ps
+              docker compose logs --tail 40
+              exit 1
+            fi
           done
 
       - name: Migrate and ingest the pinned corpus
@@ -116,6 +160,7 @@ jobs:
           docker compose exec -T retrieval alembic upgrade head
           docker compose exec -T answer alembic upgrade head
           docker compose exec -T evals alembic upgrade head
+          docker compose exec -T auth alembic upgrade head
           # Both containers need the corpus: the service validates the path, the
           # worker is what actually reads it.
           docker compose cp /tmp/fastapi-src/docs/en/docs retrieval:/corpus

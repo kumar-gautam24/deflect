@@ -116,6 +116,30 @@ services:
       redis:
         condition: service_healthy
 
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    environment:
+      RETRIEVAL_URL: http://retrieval:8001
+      ANSWER_URL: http://answer:8002
+      EVALS_URL: http://evals:8003
+      AUTH_URL: http://auth:8004
+      REDIS_URL: redis://:${REDIS_PASSWORD:-dev-redis-password}@redis:6379/0
+      ENV: ${ENV:-development}
+      SERVICE_TOKEN: ${SERVICE_TOKEN:-dev-service-token}
+      OPERATOR_TOKEN: ${OPERATOR_TOKEN:-dev-operator-token}
+      # Nothing sits in front of the gateway locally, so there is no hop to trust and
+      # edge_address falls back to the peer -- which is the right answer here.
+      TRUSTED_PROXY_HOPS: 0
+    ports: ["${GATEWAY_PORT:-8000}:8000"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth:
+        condition: service_started
+      answer:
+        condition: service_started
 
   # Workers run the images already built, with a different command. Each needs its own
   # service's database and dependencies -- the ingest worker embeds, the eval worker

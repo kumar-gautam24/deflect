@@ -2,14 +2,16 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest_asyncio
+from deflect_common.ratelimit import SlidingWindowLimiter
 from deflect_common.sessions import FakeSessionStore
 from httpx import ASGITransport, AsyncClient
 
 from auth.db import get_session
 from auth.main import app as fastapi_app
-from auth.main import build_sessions
+from auth.main import build_login_backstop, build_sessions
 from auth.models import AdminUser
 from auth.passwords import hash_password
+from auth.policy import Policy
 
 
 async def _user(session, email="a@x.com", password="pw", role="admin") -> AdminUser:
@@ -24,6 +26,13 @@ async def app(session):
     session.commit = session.flush
     fastapi_app.dependency_overrides[get_session] = lambda: session
     fastapi_app.dependency_overrides[build_sessions] = lambda: FakeSessionStore()
+    # A fresh backstop per test, not the module-level singleton it replaces here: sharing
+    # one instance would let one test's login attempts spend another test's allowance.
+    # Captured once, not built inside the lambda: FastAPI calls an override callable fresh
+    # on every request, so a lambda that constructs the limiter would hand each request
+    # its own empty one and it could never accumulate even within a single test.
+    backstop = SlidingWindowLimiter(Policy.LOGIN_BACKSTOP_PER_HOUR, window_seconds=3600)
+    fastapi_app.dependency_overrides[build_login_backstop] = lambda: backstop
     yield fastapi_app
     fastapi_app.dependency_overrides.clear()
 
@@ -43,6 +52,27 @@ async def test_a_correct_login_returns_a_token(session, app):
 
     assert response.status_code == 200
     assert response.json()["token"]
+
+
+async def test_the_backstop_rejects_once_its_own_budget_is_spent(session, app):
+    """This is the direct-door control, not the gateway's precise per-visitor login
+    bucket: a caller reaching /auth/login on :8004 directly, bypassing the gateway's
+    limiter entirely, still gets throttled rather than running an unconditional argon2id
+    hash forever.
+    """
+    await _user(session)
+    # Captured once, not built inside the lambda: FastAPI invokes an override callable
+    # fresh on every request rather than caching it, so a lambda that constructs the
+    # limiter would hand each request its own empty one and it could never actually trip.
+    tiny_backstop = SlidingWindowLimiter(1, window_seconds=3600)
+    fastapi_app.dependency_overrides[build_login_backstop] = lambda: tiny_backstop
+
+    first = await call(app, "POST", "/auth/login", json={"email": "a@x.com", "password": "pw"})
+    second = await call(app, "POST", "/auth/login", json={"email": "a@x.com", "password": "pw"})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert int(second.headers["Retry-After"]) > 0
 
 
 async def test_a_wrong_password_and_an_unknown_email_return_the_same_body(session, app):

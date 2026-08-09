@@ -11,13 +11,15 @@ import json  # noqa: E402
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from deflect_common.llm.fake import FakeClient  # noqa: E402
+from deflect_common.ratelimit import SlidingWindowLimiter  # noqa: E402
 from deflect_common.schemas import Hit  # noqa: E402
 from doubles import FakeRetrieval, hit  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
+from answer.config import get_settings  # noqa: E402
 from answer.db import engine, get_session  # noqa: E402
 from answer.main import app as fastapi_app  # noqa: E402
-from answer.main import build_client, build_retrieval  # noqa: E402
+from answer.main import build_ask_backstop, build_client, build_retrieval  # noqa: E402
 
 
 @pytest_asyncio.fixture
@@ -57,6 +59,12 @@ def make_app(session):
         fastapi_app.dependency_overrides[get_session] = lambda: session
         fastapi_app.dependency_overrides[build_client] = lambda: FakeClient(responses)
         fastapi_app.dependency_overrides[build_retrieval] = lambda: retrieval
+        # A fresh limiter per test app, not the module-level singleton: a
+        # `lambda: SlidingWindowLimiter(...)` override would rebuild it on every request
+        # and the backstop could never trip, but sharing ONE instance across tests would
+        # let one test's traffic spend another test's allowance instead.
+        backstop = SlidingWindowLimiter(get_settings().ask_backstop_per_hour, window_seconds=3600)
+        fastapi_app.dependency_overrides[build_ask_backstop] = lambda: backstop
         return fastapi_app
 
     yield build

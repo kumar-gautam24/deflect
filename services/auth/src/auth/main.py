@@ -58,9 +58,6 @@ async def validation_error(request: Request, exc: RequestValidationError) -> JSO
 # exits before binding a port, the same refuse-to-boot behaviour every other service has.
 _sessions = RedisSessionStore(get_settings().redis_url)
 require_service = bearer_guard(get_settings().service_token, "service")
-_login_limiter = SlidingWindowLimiter(
-    limit=Policy.LOGIN_ATTEMPTS_PER_HOUR, window_seconds=3600
-)
 
 
 def build_sessions() -> SessionStore:
@@ -68,6 +65,20 @@ def build_sessions() -> SessionStore:
 
 
 SessionsDep = Annotated[SessionStore, Depends(build_sessions)]
+
+# A CPU/spend backstop for the direct door -- see LOGIN_BACKSTOP_PER_HOUR in policy.py
+# for why the number is generous rather than precise. Built once at module scope and
+# exposed through Depends rather than a closure: a `lambda: SlidingWindowLimiter(...)`
+# override would hand each request a fresh, empty limiter and the backstop could never
+# actually trip.
+_login_backstop = SlidingWindowLimiter(Policy.LOGIN_BACKSTOP_PER_HOUR, window_seconds=3600)
+
+
+def build_login_backstop() -> SlidingWindowLimiter:
+    return _login_backstop
+
+
+LoginBackstopDep = Annotated[SlidingWindowLimiter, Depends(build_login_backstop)]
 
 
 async def current_session(
@@ -119,11 +130,28 @@ async def ready(session: SessionDep) -> dict[str, str]:
 
 @router.post("/auth/login")
 async def login_route(
-    request: LoginRequest, http: Request, session: SessionDep, sessions: SessionsDep
+    request: LoginRequest,
+    http: Request,
+    session: SessionDep,
+    sessions: SessionsDep,
+    backstop: LoginBackstopDep,
 ) -> dict:
+    # Not the caller's real address once every login goes through the gateway -- it is
+    # whichever hop connects to this service directly. Recorded on the session row for an
+    # operator to read, not trusted for any decision, so that mismatch does not matter here.
+    # The same value keys the backstop below: both want the true peer, not a header.
     address = client_address(http, trust_forwarded=False)
-    if not _login_limiter.check(address, time.monotonic()):
-        raise HTTPException(429, "too many login attempts", headers={"Retry-After": "3600"})
+
+    # Cheapest check first, ahead of the argon2id this service always runs: the backstop
+    # is a dict lookup, login() is a deliberately slow hash.
+    if not backstop.check(address, time.monotonic()):
+        raise HTTPException(
+            status_code=429,
+            detail="too many requests from this address",
+            # SlidingWindowLimiter has no notion of a partial wait, only allowed or not,
+            # so the full window is the honest answer -- not a placeholder.
+            headers={"Retry-After": "3600"},
+        )
 
     try:
         token, row = await login(

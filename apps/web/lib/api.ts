@@ -74,10 +74,10 @@ export async function* askStream(question: string): AsyncGenerator<AskEvent> {
   }
 }
 
-// Server components call the owning service directly. Each surface reads from the
-// service that owns that data, so there is no gateway to keep in sync.
-const ANSWER_URL = process.env.ANSWER_URL ?? "http://localhost:8002";
-const EVALS_URL = process.env.EVALS_URL ?? "http://localhost:8003";
+// Server components go through the gateway now, the same as the client-rendered ask
+// page: one base URL rather than one per upstream, and the credential each function
+// forwards is what the gateway's route table actually checks for that path.
+const GATEWAY_URL = process.env.GATEWAY_URL ?? "http://localhost:8000";
 
 async function getJSONFrom<T>(base: string, path: string, token?: string): Promise<T> {
   const response = await fetch(`${base}${path}`, {
@@ -99,10 +99,10 @@ async function getJSONFrom<T>(base: string, path: string, token?: string): Promi
 export async function getFromAnswer<T>(path: string): Promise<T> {
   const { cookies } = await import("next/headers");
   const token = (await cookies()).get(COOKIE_NAME)?.value;
-  return getJSONFrom<T>(ANSWER_URL, path, token);
+  return getJSONFrom<T>(GATEWAY_URL, path, token);
 }
 
 // The eval dashboard is public and needs no credential.
 export function getFromEvals<T>(path: string): Promise<T> {
-  return getJSONFrom<T>(EVALS_URL, path);
+  return getJSONFrom<T>(GATEWAY_URL, path);
 }
