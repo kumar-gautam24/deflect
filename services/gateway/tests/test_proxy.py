@@ -186,6 +186,36 @@ async def test_an_upstream_error_status_is_relayed_rather_than_replaced(upstream
     assert response.status_code == 418
 
 
+async def test_a_slow_upstream_is_a_504():
+    """The read-timeout counterpart to the 502 below. A tiny Route.timeout over a real
+    socket, against an upstream that genuinely sleeps past it -- so this exercises
+    httpx.TimeoutException for real rather than assuming the except-ordering in proxy.py
+    (TimeoutException before the broader HTTPError it subclasses) is right by reasoning
+    alone.
+    """
+    upstream_app = build_upstream()
+    upstream_server, upstream_task, upstream_url = await _serve(upstream_app)
+
+    client = AsyncClient(base_url=upstream_url)
+    app = FastAPI()
+    route = Route("GET", "/slow", "answer", None, timeout=0.05)
+
+    async def handler(request: Request):
+        return await forward(route, request, upstream_url, client)
+
+    app.add_api_route("/slow", handler, methods=["GET"])
+    gateway_server, gateway_task, gateway_url = await _serve(app)
+
+    async with AsyncClient(base_url=gateway_url, timeout=10) as c:
+        response = await c.get("/slow")
+
+    assert response.status_code == 504
+
+    await client.aclose()
+    await _stop(gateway_server, gateway_task)
+    await _stop(upstream_server, upstream_task)
+
+
 async def test_an_unreachable_upstream_is_a_502():
     """Port 1 has nothing listening, so the httpx error and its translation are both real
     rather than mocked."""

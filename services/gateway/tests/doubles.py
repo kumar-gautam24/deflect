@@ -60,4 +60,13 @@ def build_upstream() -> FastAPI:
     async def boom() -> JSONResponse:
         return JSONResponse({"detail": "upstream said no"}, status_code=418)
 
+    @app.get("/slow")
+    async def slow() -> JSONResponse:
+        """Sleeps past any route timeout the 504 test uses, over a real socket -- so the
+        timeout that fires is a genuine read timeout rather than one inferred from reading
+        proxy.py. Short enough to keep the suite fast; the route's own timeout is tinier
+        still, so the gateway never actually waits out the full sleep."""
+        await asyncio.sleep(0.5)
+        return JSONResponse({"path": "/slow"})
+
     return app
