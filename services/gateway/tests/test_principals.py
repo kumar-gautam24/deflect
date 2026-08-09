@@ -103,8 +103,18 @@ async def test_an_unknown_role_fails_closed():
 
 
 async def test_every_route_in_the_table_is_decidable():
-    """No route may name a principal the resolver cannot evaluate."""
+    """No route may name a principal the resolver cannot evaluate.
+
+    Driven with the operator token, not `authorization=None`: an absent credential makes
+    resolve_principal return None on its first line, so `allowed` short-circuits before
+    ever reaching satisfies -- and a route whose principal string is not a key _SATISFIES
+    recognises (a typo, not yet a role) would raise KeyError there, not return False. Only
+    a credential that resolves to a real principal forces every route through that call.
+    """
     store = FakeSessionStore()
 
     for route in ROUTES:
-        assert await allowed(route, None, store, SERVICE, OPERATOR) in (True, False)
+        assert await allowed(route, f"Bearer {OPERATOR}", store, SERVICE, OPERATOR) in (
+            True,
+            False,
+        )
